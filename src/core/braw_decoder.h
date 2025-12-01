@@ -17,12 +17,19 @@ struct DecoderSettings {
     bool use_gpu{true};
 };
 
+enum class StereoView {
+    kLeft = 0,
+    kRight = 1
+};
+
 struct ClipInfo {
     std::filesystem::path source_path;
     uint32_t width{0};
     uint32_t height{0};
-    uint32_t frame_count{0};
+    uint64_t frame_count{0};
     double frame_rate{0.0};
+    uint32_t available_view_count{1};
+    bool has_immersive_video{false};
 };
 
 class BrawDecoder {
@@ -39,7 +46,7 @@ class BrawDecoder {
     [[nodiscard]] std::optional<ClipInfo> clip_info() const;
     [[nodiscard]] DecoderSettings& settings() { return settings_; }
 
-    bool decode_frame(uint32_t frame_index, FrameBuffer& out_buffer);
+    bool decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, StereoView view = StereoView::kLeft);
 
   private:
     struct Impl;
