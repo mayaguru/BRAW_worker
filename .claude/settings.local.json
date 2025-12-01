@@ -10,7 +10,11 @@
       "Bash(build/bin/braw_cli.exe:*)",
       "Bash(taskkill:*)",
       "Bash(start braw_viewer.exe)",
-      "Bash(./braw_cli.exe:*)"
+      "Bash(./braw_cli.exe:*)",
+      "Bash(cmd /c \"braw_cli.exe ..\\..\\A001_11051030_C001.braw test.exr 0 both\")",
+      "Bash(timeout 10 build/bin/braw_cli.exe:*)",
+      "Bash(timeout 20 build/bin/braw_cli.exe:*)",
+      "Bash(timeout 10:*)"
     ],
     "deny": [],
     "ask": []

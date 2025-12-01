@@ -9,6 +9,11 @@
 
 namespace braw {
 
+enum class ComThreadingModel {
+    kMultiThreaded,    // For SDK-compliant usage (CLI)
+    kApartmentThreaded // For Qt compatibility (GUI)
+};
+
 struct DecoderSettings {
     float white_balance_temperature{5600.0f};
     float white_balance_tint{10.0f};
@@ -34,7 +39,7 @@ struct ClipInfo {
 
 class BrawDecoder {
   public:
-    BrawDecoder();
+    explicit BrawDecoder(ComThreadingModel model = ComThreadingModel::kMultiThreaded);
     ~BrawDecoder();
 
     BrawDecoder(const BrawDecoder&) = delete;
@@ -47,6 +52,8 @@ class BrawDecoder {
     [[nodiscard]] DecoderSettings& settings() { return settings_; }
 
     bool decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, StereoView view = StereoView::kLeft);
+
+    void flush_jobs();
 
   private:
     struct Impl;

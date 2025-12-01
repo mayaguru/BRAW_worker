@@ -25,13 +25,13 @@ class MainWindow : public QMainWindow {
 
   private:
     void update_clip_info();
-    void render_to_label(const braw::FrameBuffer& buffer);
     void load_frame(uint32_t frame_index);
     void update_ui_state();
     void resizeEvent(QResizeEvent* event) override;
 
     braw::BrawDecoder decoder_;
-    braw::FrameBuffer frame_buffer_;
+    braw::FrameBuffer frame_buffer_left_;
+    braw::FrameBuffer frame_buffer_right_;
     QImage last_image_;
 
     QLabel* info_label_{nullptr};
@@ -43,10 +43,13 @@ class MainWindow : public QMainWindow {
     QSlider* frame_slider_{nullptr};
     QLabel* frame_label_{nullptr};
     QTimer* playback_timer_{nullptr};
+    QPushButton* stereo_button_{nullptr};
 
     uint32_t current_frame_{0};
     bool is_playing_{false};
     bool has_clip_{false};
+    bool show_stereo_sbs_{false};  // 기본값: 좌안만
 
     QImage convert_to_qimage(const braw::FrameBuffer& buffer) const;
+    QImage create_sbs_image(const braw::FrameBuffer& left, const braw::FrameBuffer& right) const;
 };

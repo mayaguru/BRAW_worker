@@ -189,16 +189,23 @@ struct BrawDecoder::Impl {
     IBlackmagicRawClip* clip{nullptr};
     IBlackmagicRawClipImmersiveVideo* immersive_clip{nullptr};
     bool com_initialized{false};
+    ComThreadingModel threading_model{ComThreadingModel::kMultiThreaded};
     std::wstring sdk_library_dir;
 
     bool ensure_com() {
         if (com_initialized) {
             return true;
         }
-        const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        if (hr == RPC_E_CHANGED_MODE) {
-            std::cerr << "COM 초기화 모드가 호환되지 않습니다.\n";
-            return false;
+
+        const DWORD coinit_flags = (threading_model == ComThreadingModel::kMultiThreaded)
+            ? COINIT_MULTITHREADED
+            : COINIT_APARTMENTTHREADED;
+
+        const HRESULT hr = CoInitializeEx(nullptr, coinit_flags);
+        if (hr == RPC_E_CHANGED_MODE || hr == S_FALSE) {
+            // 이미 다른 곳에서 COM이 초기화됨 (Qt 등)
+            // 문제 없으니 계속 진행
+            return true;
         }
         if (FAILED(hr)) {
             log_hresult("COM 초기화 실패", hr);
@@ -276,8 +283,9 @@ struct BrawDecoder::Impl {
     std::optional<ClipInfo> info;
 };
 
-BrawDecoder::BrawDecoder() : impl_(std::make_unique<Impl>()) {
+BrawDecoder::BrawDecoder(ComThreadingModel model) : impl_(std::make_unique<Impl>()) {
 #ifdef BRAW_SDK_AVAILABLE
+    impl_->threading_model = model;
 #ifdef BRAW_SDK_LIBRARY_DIR
     impl_->sdk_library_dir = std::filesystem::path(BRAW_SDK_LIBRARY_DIR).wstring();
 #endif
@@ -430,6 +438,14 @@ bool BrawDecoder::decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, St
     }
 
     return true;
+#endif
+}
+
+void BrawDecoder::flush_jobs() {
+#ifdef BRAW_SDK_AVAILABLE
+    if (impl_->codec) {
+        impl_->codec->FlushJobs();
+    }
 #endif
 }
 
