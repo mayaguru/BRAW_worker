@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(git rm:*)",
-      "Bash(cmake:*)"
+      "Bash(cmake:*)",
+      "Bash(build/src/app/Release/braw_cli.exe:*)",
+      "Bash(start build/src/ui/Release/braw_viewer.exe)",
+      "Bash(build/src/ui/Release/braw_viewer.exe)",
+      "Bash(./braw_viewer.exe)",
+      "Bash(build/bin/braw_cli.exe:*)",
+      "Bash(taskkill:*)",
+      "Bash(start braw_viewer.exe)",
+      "Bash(./braw_cli.exe:*)"
     ],
     "deny": [],
     "ask": []

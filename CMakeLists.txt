@@ -11,6 +11,19 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
+# 실행 파일과 DLL을 bin 디렉토리로 출력
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# 멀티 설정 빌드 시스템(MSVC)에서도 동일 경로 사용
+foreach(CONFIG ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER ${CONFIG} CONFIG_UPPER)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_BINARY_DIR}/lib)
+endforeach()
+
 option(BRAW_ENABLE_SDK "Enable integration with the Blackmagic RAW SDK" ON)
 option(OPENEXR_ENABLE "Enable OpenEXR export support" ON)
 

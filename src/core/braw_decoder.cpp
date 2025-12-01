@@ -195,7 +195,7 @@ struct BrawDecoder::Impl {
         if (com_initialized) {
             return true;
         }
-        const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (hr == RPC_E_CHANGED_MODE) {
             std::cerr << "COM 초기화 모드가 호환되지 않습니다.\n";
             return false;
