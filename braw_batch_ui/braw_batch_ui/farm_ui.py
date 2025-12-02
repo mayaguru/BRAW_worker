@@ -16,11 +16,71 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QPushButton, QLineEdit,
                                QTextEdit, QGroupBox, QRadioButton, QCheckBox,
                                QFileDialog, QSpinBox, QTableWidget, QTableWidgetItem,
-                               QTabWidget, QProgressBar, QMessageBox, QMenu)
+                               QTabWidget, QProgressBar, QMessageBox, QMenu, QDialog)
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QUrl
 from PySide6.QtGui import QFont, QColor, QAction, QDesktopServices
 
 from farm_core import FarmManager, RenderJob, WorkerInfo
+from config import settings
+
+
+class SettingsDialog(QDialog):
+    """설정 다이얼로그"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("렌더팜 설정")
+        self.setMinimumWidth(500)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 공용 저장소 경로
+        farm_root_layout = QHBoxLayout()
+        farm_root_layout.addWidget(QLabel("공용 저장소:"))
+        self.farm_root_input = QLineEdit(settings.farm_root)
+        browse_btn = QPushButton("📁")
+        browse_btn.setMaximumWidth(40)
+        browse_btn.clicked.connect(self.browse_farm_root)
+        farm_root_layout.addWidget(self.farm_root_input)
+        farm_root_layout.addWidget(browse_btn)
+        layout.addLayout(farm_root_layout)
+
+        # 병렬 처리 수
+        parallel_layout = QHBoxLayout()
+        parallel_layout.addWidget(QLabel("기본 병렬 처리:"))
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, 50)
+        self.parallel_spin.setValue(settings.parallel_workers)
+        parallel_layout.addWidget(self.parallel_spin)
+        parallel_layout.addStretch()
+        layout.addLayout(parallel_layout)
+
+        # 버튼
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("저장")
+        save_btn.clicked.connect(self.save_settings)
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def browse_farm_root(self):
+        """공용 저장소 폴더 선택"""
+        folder = QFileDialog.getExistingDirectory(self, "공용 저장소 선택")
+        if folder:
+            self.farm_root_input.setText(folder)
+
+    def save_settings(self):
+        """설정 저장"""
+        settings.farm_root = self.farm_root_input.text()
+        settings.parallel_workers = self.parallel_spin.value()
+        settings.save()
+        QMessageBox.information(self, "완료", "설정이 저장되었습니다.\n재시작 후 적용됩니다.")
+        self.accept()
 
 
 class StatusUpdateThread(QThread):
@@ -287,7 +347,8 @@ class FarmUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.farm_manager = FarmManager()
+        # 설정에서 farm_root 가져오기
+        self.farm_manager = FarmManager(farm_root=settings.farm_root)
         self.worker_thread = None
         self.status_thread = None
 
@@ -418,7 +479,22 @@ class FarmUI(QMainWindow):
 
         # 제출 버튼
         submit_btn = QPushButton("✅ 작업 제출")
-        submit_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 8px; font-weight: bold; }")
+        submit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+                color: white;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+                color: white;
+            }
+        """)
         submit_btn.clicked.connect(self.submit_job)
         layout.addWidget(submit_btn)
 
@@ -444,19 +520,57 @@ class FarmUI(QMainWindow):
         settings_layout.addWidget(QLabel("병렬:"))
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 50)
-        self.parallel_spin.setValue(16)  # 기본값을 16으로 변경
+        self.parallel_spin.setValue(settings.parallel_workers)  # 설정에서 기본값 가져오기
         settings_layout.addWidget(self.parallel_spin)
         settings_layout.addStretch()
+
+        # 설정 버튼
+        settings_btn = QPushButton("⚙️")
+        settings_btn.setMaximumWidth(40)
+        settings_btn.setToolTip("렌더팜 설정")
+        settings_btn.clicked.connect(self.show_settings)
+        settings_layout.addWidget(settings_btn)
+
         layout.addLayout(settings_layout)
 
         # 시작/중지 버튼
         btn_layout = QHBoxLayout()
         self.start_worker_btn = QPushButton("▶️ 시작")
-        self.start_worker_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 8px; font-weight: bold; }")
+        self.start_worker_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+                color: white;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+                color: white;
+            }
+        """)
         self.start_worker_btn.clicked.connect(self.start_worker)
 
         self.stop_worker_btn = QPushButton("⏹️ 중지")
-        self.stop_worker_btn.setStyleSheet("QPushButton { background-color: #f44336; color: white; padding: 8px; font-weight: bold; }")
+        self.stop_worker_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #da190b;
+                color: white;
+            }
+            QPushButton:pressed {
+                background-color: #c1160a;
+                color: white;
+            }
+        """)
         self.stop_worker_btn.clicked.connect(self.stop_worker)
         self.stop_worker_btn.setEnabled(False)
 
@@ -648,6 +762,19 @@ class FarmUI(QMainWindow):
 
         self.start_worker_btn.setEnabled(True)
         self.stop_worker_btn.setEnabled(False)
+
+    def show_settings(self):
+        """설정 다이얼로그 표시"""
+        dialog = SettingsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            # 설정이 변경되었으므로 병렬 처리 수 업데이트
+            self.parallel_spin.setValue(settings.parallel_workers)
+            # farm_root가 변경된 경우 알림
+            QMessageBox.information(
+                self,
+                "설정 저장됨",
+                f"설정이 저장되었습니다.\n공용 저장소: {settings.farm_root}\n병렬 처리: {settings.parallel_workers}"
+            )
 
     def append_worker_log(self, text):
         """워커 로그 추가"""
