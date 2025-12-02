@@ -540,20 +540,64 @@ class BrawBatchUI:
             # 세그먼트 완료
             self.log(f"세그먼트 #{segment_num} 완료\n")
 
+        # 최종 실패 작업 집중 재시도
+        if self.is_running and self.failed_jobs:
+            final_failed_jobs = [j for j in self.failed_jobs if j.attempts >= max_retries]
+
+            if final_failed_jobs:
+                self.log("")
+                self.log(f"=== 최종 실패 작업 집중 재시도 ===")
+                self.log(f"실패 작업 수: {len(final_failed_jobs)}")
+                self.log(f"병렬 처리: {max_workers}")
+                self.log("")
+
+                # 최종 재시도 (모든 실패 작업을 한번에 병렬 처리)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_job = {}
+                    for job in final_failed_jobs:
+                        if not self.is_running:
+                            break
+
+                        job.attempts += 1
+                        self.log(f"🔄 [{job.frame_idx}] {job.eye_mode.upper()} 최종 재시도 ({job.attempts}차)")
+
+                        future = executor.submit(self.run_cli, job)
+                        future_to_job[future] = job
+
+                    # 완료된 작업 처리
+                    for future in as_completed(future_to_job):
+                        if not self.is_running:
+                            break
+
+                        job = future_to_job[future]
+                        success = future.result()
+
+                        if success:
+                            size_mb = job.output_file.stat().st_size / 1024 / 1024
+                            self.log(f"  ✓ [{job.frame_idx}] {job.eye_mode.upper()} 성공! {size_mb:.1f} MB")
+
+                            self.failed_jobs.remove(job)
+                            self.completed_count += 1
+                        else:
+                            self.log(f"  ✗ [{job.frame_idx}] {job.eye_mode.upper()} 여전히 실패: {job.error_msg}", "error")
+
+                        self.update_stats()
+
+                self.log(f"\n최종 재시도 완료\n")
+
         # 최종 결과
         self.save_failed_jobs()
 
         total = len(self.all_jobs)
         completed = self.completed_count
-        final_failed = len([j for j in self.failed_jobs if j.attempts >= max_retries])
+        final_failed = len(self.failed_jobs)
 
         self.log("")
-        self.log(f"=== 처리 완료 ===")
+        self.log(f"=== 전체 작업 완료 ===")
         self.log(f"완료: {completed}/{total}")
-        self.log(f"실패 (재시도 가능): {len(self.failed_jobs) - final_failed}")
-        self.log(f"실패 (포기): {final_failed}")
+        self.log(f"최종 실패: {final_failed}")
 
-        self.status_var.set(f"완료: {completed}/{total}, 실패: {len(self.failed_jobs)}")
+        self.status_var.set(f"완료: {completed}/{total}, 실패: {final_failed}")
 
         self.is_running = False
         self.start_btn.configure(state=tk.NORMAL)
