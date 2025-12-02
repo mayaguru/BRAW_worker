@@ -4,48 +4,92 @@
 
 ## 📦 배포 순서
 
-### 1. 프로그램 복사
+### 1. 자동 배포 (권장)
 
 ```batch
 # 프로젝트 루트에서
 DEPLOY.bat
 ```
 
-이 명령으로 다음 경로에 복사됩니다:
+이 명령으로 자동으로:
+1. 프로그램 파일 → `P:\00-GIGA\BRAW_CLI\braw_batch_ui\`
+2. CLI 실행 파일 → `P:\00-GIGA\BRAW_CLI\braw_cli.exe`
+3. **BRAW SDK DLL** → `P:\00-GIGA\BRAW_CLI\*.dll`
+
+### 2. 수동 배포 (자동 배포 실패 시)
+
+**A. 프로그램 파일**
 ```
-P:\00-GIGA\BRAW_CLI\braw_batch_ui\
+복사: d:\_DEV\Braw\braw_batch_ui\
+대상: P:\00-GIGA\BRAW_CLI\braw_batch_ui\
 ```
 
-### 2. CLI 실행 파일 복사
-
-**방법 A: build 폴더에서 복사**
+**B. CLI 실행 파일**
 ```
 복사: d:\_DEV\Braw\build\bin\braw_cli.exe
 대상: P:\00-GIGA\BRAW_CLI\braw_cli.exe
 ```
 
-**방법 B: Release 폴더에서 복사**
+**C. BRAW SDK DLL (중요!)**
 ```
-복사: d:\_DEV\Braw\build\src\app\Release\braw_cli.exe
-대상: P:\00-GIGA\BRAW_CLI\braw_cli.exe
+복사: C:\Program Files (x86)\Blackmagic Design\Blackmagic RAW\Blackmagic RAW SDK\Win\Libraries\*.dll
+대상: P:\00-GIGA\BRAW_CLI\
+
+필요한 DLL:
+- BlackmagicRawAPI.dll
+- DecoderCUDA.dll
+- DecoderOpenCL.dll
+- InstructionSetServicesAVX.dll
+- InstructionSetServicesAVX2.dll
 ```
 
-**최종 구조:**
+**최종 구조 (방법 A - 루트에 배치):**
 ```
 P:\00-GIGA\BRAW_CLI\
-├─ braw_cli.exe          ← CLI 실행 파일
-├─ braw_batch_ui\        ← 프로그램 폴더
+├─ braw_cli.exe                      ← CLI 실행 파일
+├─ BlackmagicRawAPI.dll              ← SDK DLL (필수!)
+├─ DecoderCUDA.dll                   ← 디코더 DLL
+├─ DecoderOpenCL.dll                 ← 디코더 DLL
+├─ InstructionSetServicesAVX.dll     ← 최적화 DLL
+├─ InstructionSetServicesAVX2.dll    ← 최적화 DLL
+├─ braw_batch_ui\                    ← 프로그램 폴더
 │   ├─ braw_batch_ui\
 │   │   ├─ farm_ui.py
 │   │   ├─ farm_core.py
 │   │   └─ run_farm.py
-│   ├─ run_farm.bat      ← 실행 파일
+│   ├─ run_farm.bat                  ← 실행 파일
 │   └─ pyproject.toml
-├─ workers\              ← 자동 생성
-├─ jobs\                 ← 자동 생성
-├─ claims\               ← 자동 생성
-└─ completed\            ← 자동 생성
+├─ workers\                          ← 자동 생성
+├─ jobs\                             ← 자동 생성
+├─ claims\                           ← 자동 생성
+└─ completed\                        ← 자동 생성
 ```
+
+**최종 구조 (방법 B - build/bin에 배치, 더 간단!):**
+```
+P:\00-GIGA\BRAW_CLI\
+├─ build\
+│   └─ bin\
+│       ├─ braw_cli.exe              ← CLI 실행 파일
+│       ├─ BlackmagicRawAPI.dll      ← SDK DLL (필수!)
+│       ├─ DecoderCUDA.dll           ← 디코더 DLL
+│       ├─ DecoderOpenCL.dll         ← 디코더 DLL
+│       ├─ InstructionSetServicesAVX.dll
+│       └─ InstructionSetServicesAVX2.dll
+├─ braw_batch_ui\                    ← 프로그램 폴더
+│   ├─ braw_batch_ui\
+│   │   ├─ farm_ui.py
+│   │   ├─ farm_core.py
+│   │   └─ run_farm.py
+│   ├─ run_farm.bat                  ← 실행 파일
+│   └─ pyproject.toml
+├─ workers\                          ← 자동 생성
+├─ jobs\                             ← 자동 생성
+├─ claims\                           ← 자동 생성
+└─ completed\                        ← 자동 생성
+```
+
+**참고**: 방법 B를 사용하면 개발 환경과 동일한 구조로 배포할 수 있어 더 간단합니다!
 
 ## 🖥️ 각 PC에서 실행
 
@@ -117,6 +161,37 @@ class FarmConfig:
 ```
 
 ## 🔧 문제 해결
+
+### ⚠️ 워커가 프레임 처리를 못함 (가장 중요!)
+
+**증상:**
+- 워커가 작업을 찾지만 프레임 처리가 실패 (✗ 표시)
+- 개발 PC에서는 되는데 다른 PC에서는 안됨
+
+**원인:**
+- BRAW SDK DLL이 없음
+
+**해결:**
+1. **자동 배포 재실행** (개발 PC에서):
+   ```batch
+   DEPLOY.bat
+   ```
+
+2. **수동 복사** (자동 배포 실패 시):
+   ```
+   복사: C:\Program Files (x86)\Blackmagic Design\Blackmagic RAW\Blackmagic RAW SDK\Win\Libraries\*.dll
+   대상: P:\00-GIGA\BRAW_CLI\
+   ```
+
+3. **확인:**
+   ```
+   P:\00-GIGA\BRAW_CLI\ 폴더에 다음 파일들이 있는지 확인:
+   - BlackmagicRawAPI.dll
+   - DecoderCUDA.dll
+   - DecoderOpenCL.dll
+   - InstructionSetServicesAVX.dll
+   - InstructionSetServicesAVX2.dll
+   ```
 
 ### "braw_cli.exe를 찾을 수 없습니다"
 

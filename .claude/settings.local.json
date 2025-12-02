@@ -23,7 +23,8 @@
       "Bash(tasklist:*)",
       "Bash(cat:*)",
       "Bash(iconv:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(where:*)"
     ],
     "deny": [],
     "ask": []

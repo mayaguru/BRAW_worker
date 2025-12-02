@@ -171,7 +171,8 @@ class FarmUI(QMainWindow):
         possible_paths = [
             Path(__file__).parent.parent.parent / "build" / "bin" / "braw_cli.exe",
             Path(__file__).parent.parent.parent / "build" / "src" / "app" / "Release" / "braw_cli.exe",
-            Path(__file__).parent.parent / "braw_cli.exe",  # 공유 폴더
+            Path(__file__).parent.parent / "build" / "bin" / "braw_cli.exe",  # 공유 폴더 build/bin
+            Path(__file__).parent.parent / "braw_cli.exe",  # 공유 폴더 루트
             Path(__file__).parent.parent.parent / "braw_cli.exe",  # 상위 폴더
         ]
 
@@ -226,13 +227,30 @@ class FarmUI(QMainWindow):
 
         # 파일 선택
         file_group = QGroupBox("BRAW 파일")
-        file_layout = QHBoxLayout()
+        file_layout = QVBoxLayout()
+
+        # 파일 경로
+        path_layout = QHBoxLayout()
         self.clip_input = QLineEdit()
         browse_btn = QPushButton("찾아보기")
         browse_btn.clicked.connect(self.browse_clip)
-        file_layout.addWidget(QLabel("클립:"))
-        file_layout.addWidget(self.clip_input)
-        file_layout.addWidget(browse_btn)
+        path_layout.addWidget(QLabel("클립:"))
+        path_layout.addWidget(self.clip_input)
+        path_layout.addWidget(browse_btn)
+        file_layout.addLayout(path_layout)
+
+        # 파일 정보
+        info_layout = QHBoxLayout()
+        self.file_info_label = QLabel("파일을 선택하면 정보가 표시됩니다")
+        self.file_info_label.setStyleSheet("color: gray; font-style: italic; padding: 5px;")
+        self.file_info_label.setMinimumHeight(30)
+        probe_btn = QPushButton("정보 가져오기")
+        probe_btn.setMaximumWidth(120)
+        probe_btn.clicked.connect(self.probe_clip)
+        info_layout.addWidget(self.file_info_label, 1)  # stretch factor 1
+        info_layout.addWidget(probe_btn)
+        file_layout.addLayout(info_layout)
+
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
 
@@ -399,6 +417,65 @@ class FarmUI(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(self, "BRAW 파일 선택", "", "BRAW Files (*.braw)")
         if filename:
             self.clip_input.setText(filename)
+            # 자동으로 정보 가져오기
+            self.probe_clip()
+
+    def probe_clip(self):
+        """클립 정보 가져오기"""
+        clip_path = self.clip_input.text()
+        if not clip_path:
+            QMessageBox.warning(self, "경고", "먼저 BRAW 파일을 선택하세요.")
+            return
+
+        try:
+            # CLI로 정보 가져오기
+            result = subprocess.run(
+                [str(self.cli_path), clip_path, "--info"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                QMessageBox.warning(self, "오류", f"파일 정보를 가져올 수 없습니다.\n{result.stderr}")
+                return
+
+            # 출력 파싱
+            info = {}
+            for line in result.stdout.splitlines():
+                if "=" in line and not line.startswith("[DEBUG]"):
+                    key, value = line.strip().split("=", 1)
+                    info[key] = value
+
+            # UI 업데이트
+            if "FRAME_COUNT" in info:
+                frame_count = int(info["FRAME_COUNT"])
+                self.end_spin.setValue(frame_count - 1)  # 0-based index
+
+                # 정보 표시
+                width = info.get("WIDTH", "?")
+                height = info.get("HEIGHT", "?")
+                fps = info.get("FRAME_RATE", "?")
+                stereo = "스테레오" if info.get("STEREO") == "true" else "모노"
+
+                info_text = f"📹 {width}x{height} @ {fps}fps | 프레임: {frame_count} | {stereo}"
+                self.file_info_label.setText(info_text)
+                self.file_info_label.setStyleSheet("color: green; font-weight: bold;")
+
+                # 스테레오가 아니면 Right 체크 해제
+                if info.get("STEREO") != "true":
+                    self.right_check.setChecked(False)
+                    self.right_check.setEnabled(False)
+                else:
+                    self.right_check.setEnabled(True)
+
+            else:
+                QMessageBox.warning(self, "오류", "파일 정보를 파싱할 수 없습니다.")
+
+        except subprocess.TimeoutExpired:
+            QMessageBox.warning(self, "오류", "정보 가져오기 시간 초과")
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"오류 발생: {e}")
 
     def browse_output(self):
         """출력 폴더 선택"""
