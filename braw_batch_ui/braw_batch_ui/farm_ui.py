@@ -433,11 +433,23 @@ class FarmUI(QMainWindow):
                 [str(self.cli_path), clip_path, "--info"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=10
             )
 
             if result.returncode != 0:
-                QMessageBox.warning(self, "오류", f"파일 정보를 가져올 수 없습니다.\n{result.stderr}")
+                # SDK 에러인 경우 경고만 표시하고 계속 진행
+                error_msg = result.stderr if result.stderr else result.stdout
+                if "IBlackmagicRawFactory" in error_msg:
+                    QMessageBox.warning(self, "경고",
+                        "Blackmagic RAW SDK를 찾을 수 없습니다.\n"
+                        "프레임 범위를 수동으로 설정하세요.\n\n"
+                        "렌더팜 워커 PC에서는 SDK가 설치되어 있어야 합니다.")
+                    self.file_info_label.setText("⚠️ SDK 없음 - 수동 설정 필요")
+                    self.file_info_label.setStyleSheet("color: orange;")
+                else:
+                    QMessageBox.warning(self, "오류", f"파일 정보를 가져올 수 없습니다.\n{error_msg}")
                 return
 
             # 출력 파싱

@@ -11,3 +11,4 @@ claims/*
 completed/*
 workers/*
 jobs/*
+*.pyc

@@ -24,7 +24,13 @@
       "Bash(cat:*)",
       "Bash(iconv:*)",
       "Bash(git branch:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(if [ -f \"P:/00-GIGA/BRAW_CLI/A001_11051030_C001.braw\" ])",
+      "Bash(then echo \"파일 존재\")",
+      "Bash(else echo \"파일 없음\")",
+      "Bash(fi)",
+      "Bash(reg query:*)",
+      "Bash(uv sync:*)"
     ],
     "deny": [],
     "ask": []

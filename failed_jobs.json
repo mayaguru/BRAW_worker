@@ -1,1 +1,58 @@
-[]
+[
+  {
+    "frame_idx": 3,
+    "eye_mode": "left",
+    "output_file": "export\\L\\A001_11051030_C001_000003.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 2,
+    "eye_mode": "left",
+    "output_file": "export\\L\\A001_11051030_C001_000002.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 2,
+    "eye_mode": "right",
+    "output_file": "export\\R\\A001_11051030_C001_000002.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 0,
+    "eye_mode": "left",
+    "output_file": "export\\L\\A001_11051030_C001_000000.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 4,
+    "eye_mode": "left",
+    "output_file": "export\\L\\A001_11051030_C001_000004.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 1,
+    "eye_mode": "left",
+    "output_file": "export\\L\\A001_11051030_C001_000001.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 3,
+    "eye_mode": "right",
+    "output_file": "export\\R\\A001_11051030_C001_000003.exr",
+    "clip_path": "P:\\00-GIGA\\BRAW_CLI\\A001_11051030_C001.braw",
+    "attempts": 2,
+    "error_msg": "exit: 3221225477"
+  }
+]
