@@ -258,11 +258,12 @@ class FarmManager:
     def release_claim(self, job_id: str, frame_idx: int, eye: str):
         """클레임 해제"""
         claim_file = self.config.claims_dir / f"{job_id}_{frame_idx:06d}_{eye}.json"
-        if claim_file.exists():
-            try:
-                claim_file.unlink()
-            except:
-                pass
+        try:
+            # missing_ok=True: 파일이 없어도 에러 안남
+            claim_file.unlink(missing_ok=True)
+        except Exception as e:
+            # 권한 문제나 다른 에러도 무시 (다른 워커가 삭제했을 수 있음)
+            pass
 
     def mark_completed(self, job_id: str, frame_idx: int, eye: str):
         """프레임 완료 표시"""
@@ -296,8 +297,10 @@ class FarmManager:
                 with open(claim_file, 'r', encoding='utf-8') as f:
                     claim = FrameClaim.from_dict(json.load(f))
                     if claim.is_expired():
-                        claim_file.unlink()
-            except:
+                        # missing_ok=True: 다른 워커가 이미 삭제했을 수 있음
+                        claim_file.unlink(missing_ok=True)
+            except Exception as e:
+                # 파일 읽기/삭제 중 에러 무시 (다른 워커가 처리중일 수 있음)
                 pass
 
     def find_next_frame(self, job: RenderJob) -> Optional[Tuple[int, str]]:
