@@ -22,7 +22,10 @@
       "Bash(uv run:*)",
       "Bash(tasklist:*)",
       "Bash(cat:*)",
-      "Bash(iconv:*)"
+      "Bash(iconv:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

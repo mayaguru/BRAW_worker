@@ -4,3 +4,10 @@ build/*
 *.exr
 test_output_L
 test_output_R
+claims/*
+
+*.pyc
+
+completed/*
+workers/*
+jobs/*
