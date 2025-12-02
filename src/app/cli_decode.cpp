@@ -49,8 +49,17 @@ std::optional<EyeMode> parse_eye_mode(const std::string& token) {
 }
 
 std::optional<Arguments> parse_arguments(int argc, char** argv) {
+    // --info 모드 체크
+    if (argc >= 3 && std::string(argv[2]) == "--info") {
+        Arguments args;
+        args.clip_path = argv[1];
+        args.output_path = "--info";  // 특수 마커
+        return args;
+    }
+
     if (argc < 3) {
         std::cerr << "사용법: braw_cli <clip.braw> <output.(ppm|exr)> [frame_index] [eye(left|right|both)]\n";
+        std::cerr << "또는:   braw_cli <clip.braw> --info\n";
         return std::nullopt;
     }
 
@@ -123,6 +132,21 @@ int main(int argc, char** argv) {
 
     const auto info = decoder.clip_info();
     std::cout << "[DEBUG] 4. Clip info retrieved\n";
+
+    // --info 모드: 클립 정보만 출력하고 종료
+    if (args->output_path == "--info") {
+        if (info) {
+            std::cout << "FRAME_COUNT=" << info->frame_count << "\n";
+            std::cout << "WIDTH=" << info->width << "\n";
+            std::cout << "HEIGHT=" << info->height << "\n";
+            std::cout << "FRAME_RATE=" << info->frame_rate << "\n";
+            std::cout << "STEREO=" << (info->has_immersive_video ? "true" : "false") << "\n";
+        } else {
+            std::cerr << "클립 정보를 가져올 수 없습니다.\n";
+            return 1;
+        }
+        return 0;
+    }
 
     if (args->eye_mode == EyeMode::kBoth) {
         if (!info || !info->has_immersive_video || info->available_view_count < 2) {

@@ -92,6 +92,13 @@ class BrawBatchUI:
         self.end_var = tk.StringVar(value="29")
         ttk.Entry(frame_frame, textvariable=self.end_var, width=8).pack(side=tk.LEFT, padx=5)
 
+        self.all_frames_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame_frame, text="전체", variable=self.all_frames_var,
+                       command=self.toggle_all_frames).pack(side=tk.LEFT, padx=10)
+
+        ttk.Button(frame_frame, text="클립 정보 가져오기",
+                  command=self.fetch_clip_info).pack(side=tk.LEFT, padx=10)
+
         # 눈 선택
         eye_frame = ttk.Frame(main_frame)
         eye_frame.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=10)
@@ -199,6 +206,72 @@ class BrawBatchUI:
         directory = filedialog.askdirectory(title="출력 폴더 선택")
         if directory:
             self.output_var.set(directory)
+
+    def toggle_all_frames(self):
+        """전체 체크박스 토글"""
+        if self.all_frames_var.get():
+            # 전체 선택 시 자동으로 클립 정보 가져오기
+            self.fetch_clip_info()
+        else:
+            # 전체 해제 시 수동 입력 가능하도록 활성화
+            pass
+
+    def fetch_clip_info(self):
+        """BRAW 파일에서 프레임 정보 가져오기"""
+        clip_path = self.clip_var.get()
+        if not clip_path:
+            messagebox.showwarning("경고", "BRAW 파일을 먼저 선택하세요.")
+            return
+
+        clip = Path(clip_path)
+        if not clip.exists():
+            messagebox.showerror("오류", f"파일이 존재하지 않습니다: {clip_path}")
+            return
+
+        try:
+            cmd = [str(self.cli_path), str(clip), "--info"]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                messagebox.showerror("오류", f"클립 정보를 가져올 수 없습니다.\n{result.stderr}")
+                return
+
+            # 출력 파싱
+            info = {}
+            for line in result.stdout.splitlines():
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    info[key] = value
+
+            if 'FRAME_COUNT' in info:
+                frame_count = int(info['FRAME_COUNT'])
+                self.start_var.set("0")
+                self.end_var.set(str(frame_count - 1))
+
+                stereo = info.get('STEREO', 'false') == 'true'
+                if stereo:
+                    self.left_var.set(True)
+                    self.right_var.set(True)
+
+                messagebox.showinfo("정보",
+                    f"프레임 수: {frame_count}\n"
+                    f"해상도: {info.get('WIDTH', '?')}x{info.get('HEIGHT', '?')}\n"
+                    f"프레임률: {info.get('FRAME_RATE', '?')}\n"
+                    f"스테레오: {'예' if stereo else '아니오'}")
+            else:
+                messagebox.showerror("오류", "프레임 정보를 파싱할 수 없습니다.")
+
+        except subprocess.TimeoutExpired:
+            messagebox.showerror("오류", "클립 정보 가져오기 시간 초과")
+        except Exception as e:
+            messagebox.showerror("오류", f"오류 발생: {str(e)}")
 
     def log(self, message: str, tag: str = "info"):
         self.log_queue.put((message, tag))
