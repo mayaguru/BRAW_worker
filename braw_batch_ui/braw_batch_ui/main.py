@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BRAW Batch Export UI
-세그먼트 기반 배치 처리 + 주기적 재시도
+세그먼트 기반 배치 처리 + 주기적 재시도 + 병렬 처리
 """
 
 import os
@@ -14,6 +14,7 @@ import threading
 import queue
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class Job:
@@ -123,9 +124,9 @@ class BrawBatchUI:
         ttk.Entry(options_frame, textvariable=self.segment_var, width=4).pack(side=tk.LEFT, padx=5)
         ttk.Label(options_frame, text="작업").pack(side=tk.LEFT)
 
-        ttk.Label(options_frame, text="지연(ms):").pack(side=tk.LEFT, padx=(20, 5))
-        self.delay_var = tk.StringVar(value="100")
-        ttk.Entry(options_frame, textvariable=self.delay_var, width=6).pack(side=tk.LEFT, padx=5)
+        ttk.Label(options_frame, text="병렬 작업 수:").pack(side=tk.LEFT, padx=(20, 5))
+        self.parallel_var = tk.StringVar(value="10")
+        ttk.Entry(options_frame, textvariable=self.parallel_var, width=4).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(options_frame, text="최대 재시도:").pack(side=tk.LEFT, padx=(20, 5))
         self.max_retry_var = tk.StringVar(value="3")
@@ -333,6 +334,7 @@ class BrawBatchUI:
         self.log(f"출력: {output_dir}")
         self.log(f"총 작업: {len(self.all_jobs)}")
         self.log(f"세그먼트 크기: {self.segment_var.get()}")
+        self.log(f"병렬 작업 수: {self.parallel_var.get()}")
         self.log(f"최대 재시도: {self.max_retry_var.get()}")
         self.log("")
 
@@ -382,9 +384,9 @@ class BrawBatchUI:
             return False
 
     def export_worker(self):
-        """세그먼트 기반 작업 처리"""
+        """세그먼트 기반 작업 처리 (병렬)"""
         segment_size = int(self.segment_var.get())
-        delay_ms = int(self.delay_var.get())
+        max_workers = int(self.parallel_var.get())
         max_retries = int(self.max_retry_var.get())
 
         segment_num = 0
@@ -408,53 +410,59 @@ class BrawBatchUI:
             if not current_segment:
                 break
 
-            self.log(f"--- 세그먼트 #{segment_num} ({len(current_segment)} 작업) ---")
+            self.log(f"--- 세그먼트 #{segment_num} ({len(current_segment)} 작업, 병렬: {max_workers}) ---")
 
-            for job in current_segment:
-                if not self.is_running:
-                    break
+            # 병렬 처리
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 작업 제출
+                future_to_job = {}
+                for job in current_segment:
+                    if not self.is_running:
+                        break
 
-                job.attempts += 1
-                is_retry = job in self.failed_jobs
+                    job.attempts += 1
+                    is_retry = job in self.failed_jobs
 
-                status = f"재시도 [{job.attempts}/{max_retries}]" if is_retry else "처리 중"
-                self.status_var.set(f"[{job.frame_idx}] {job.eye_mode.upper()} - {status}")
+                    prefix = "↻" if is_retry else "→"
+                    self.log(f"{prefix} [{job.frame_idx}] {job.eye_mode.upper()} ({job.attempts}차) 시작")
 
-                prefix = "↻" if is_retry else "→"
-                self.log(f"{prefix} [{job.frame_idx}] {job.eye_mode.upper()} ({job.attempts}차)")
+                    future = executor.submit(self.run_cli, job)
+                    future_to_job[future] = job
 
-                success = self.run_cli(job)
+                # 완료된 작업 처리
+                for future in as_completed(future_to_job):
+                    if not self.is_running:
+                        break
 
-                if success:
-                    size_mb = job.output_file.stat().st_size / 1024 / 1024
-                    self.log(f"  ✓ {size_mb:.1f} MB")
+                    job = future_to_job[future]
+                    success = future.result()
 
-                    # 성공 시 리스트에서 제거
-                    if job in self.pending_jobs:
-                        self.pending_jobs.remove(job)
-                    if job in self.failed_jobs:
-                        self.failed_jobs.remove(job)
+                    if success:
+                        size_mb = job.output_file.stat().st_size / 1024 / 1024
+                        self.log(f"  ✓ [{job.frame_idx}] {job.eye_mode.upper()} {size_mb:.1f} MB")
 
-                    self.completed_count += 1
-                else:
-                    self.log(f"  ✗ FAIL: {job.error_msg}", "error")
+                        # 성공 시 리스트에서 제거
+                        if job in self.pending_jobs:
+                            self.pending_jobs.remove(job)
+                        if job in self.failed_jobs:
+                            self.failed_jobs.remove(job)
 
-                    # 실패 처리
-                    if job in self.pending_jobs:
-                        self.pending_jobs.remove(job)
+                        self.completed_count += 1
+                    else:
+                        self.log(f"  ✗ [{job.frame_idx}] {job.eye_mode.upper()} FAIL: {job.error_msg}", "error")
 
-                    if job not in self.failed_jobs:
-                        self.failed_jobs.append(job)
+                        # 실패 처리
+                        if job in self.pending_jobs:
+                            self.pending_jobs.remove(job)
 
-                    # 최대 재시도 초과 시
-                    if job.attempts >= max_retries:
-                        self.log(f"  ⚠ 최대 재시도 횟수 초과 (포기)", "error")
+                        if job not in self.failed_jobs:
+                            self.failed_jobs.append(job)
 
-                self.update_stats()
+                        # 최대 재시도 초과 시
+                        if job.attempts >= max_retries:
+                            self.log(f"  ⚠ [{job.frame_idx}] {job.eye_mode.upper()} 최대 재시도 횟수 초과 (포기)", "error")
 
-                # 지연
-                if delay_ms > 0:
-                    time.sleep(delay_ms / 1000.0)
+                    self.update_stats()
 
             # 세그먼트 완료
             self.log(f"세그먼트 #{segment_num} 완료\n")
