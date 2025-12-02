@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 import threading
+import psutil
 
 
 class FarmConfig:
@@ -33,9 +34,14 @@ class WorkerInfo:
         self.worker_id = socket.gethostname()
         self.ip = self.get_ip()
         self.last_heartbeat = datetime.now()
-        self.status = "idle"  # idle, working
+        self.status = "idle"  # idle, active
         self.frames_processing = 0
         self.frames_completed = 0
+        self.cpu_usage = 0.0
+        self.current_job_id = ""
+        self.current_clip_name = ""
+        self.total_errors = 0
+        self.current_processed = 0
 
     @staticmethod
     def get_ip():
@@ -55,7 +61,12 @@ class WorkerInfo:
             "last_heartbeat": self.last_heartbeat.isoformat(),
             "status": self.status,
             "frames_processing": self.frames_processing,
-            "frames_completed": self.frames_completed
+            "frames_completed": self.frames_completed,
+            "cpu_usage": self.cpu_usage,
+            "current_job_id": self.current_job_id,
+            "current_clip_name": self.current_clip_name,
+            "total_errors": self.total_errors,
+            "current_processed": self.current_processed
         }
 
     @classmethod
@@ -67,6 +78,11 @@ class WorkerInfo:
         w.status = data["status"]
         w.frames_processing = data.get("frames_processing", 0)
         w.frames_completed = data.get("frames_completed", 0)
+        w.cpu_usage = data.get("cpu_usage", 0.0)
+        w.current_job_id = data.get("current_job_id", "")
+        w.current_clip_name = data.get("current_clip_name", "")
+        w.total_errors = data.get("total_errors", 0)
+        w.current_processed = data.get("current_processed", 0)
         return w
 
 
@@ -156,6 +172,8 @@ class FarmManager:
         self.worker = WorkerInfo()
         self.heartbeat_thread = None
         self.is_running = False
+        self.network_connected = True
+        self.last_job_id = None  # 마지막 작업 ID 저장
 
     def start(self):
         """워커 시작"""
@@ -180,6 +198,11 @@ class FarmManager:
     def update_worker(self):
         """워커 상태 업데이트"""
         self.worker.last_heartbeat = datetime.now()
+        # CPU 사용률 업데이트
+        try:
+            self.worker.cpu_usage = psutil.cpu_percent(interval=0.1)
+        except:
+            self.worker.cpu_usage = 0.0
         worker_file = self.config.workers_dir / f"{self.worker.worker_id}.json"
         with open(worker_file, 'w', encoding='utf-8') as f:
             json.dump(self.worker.to_dict(), f, indent=2)
@@ -312,3 +335,99 @@ class FarmManager:
                     if self.claim_frame(job.job_id, frame_idx, eye):
                         return (frame_idx, eye)
         return None
+
+    def check_network_connection(self) -> bool:
+        """네트워크 연결 확인"""
+        try:
+            # jobs 폴더에 접근 시도
+            list(self.config.jobs_dir.glob("*.json"))
+            self.network_connected = True
+            return True
+        except (OSError, PermissionError):
+            self.network_connected = False
+            return False
+
+    def get_last_job(self) -> Optional[RenderJob]:
+        """마지막 작업 가져오기"""
+        if not self.last_job_id:
+            return None
+
+        try:
+            job_file = self.config.jobs_dir / f"{self.last_job_id}.json"
+            if job_file.exists():
+                with open(job_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return RenderJob.from_dict(data)
+        except:
+            pass
+        return None
+
+    def release_my_claims(self):
+        """내 워커의 모든 클레임 해제 (네트워크 복구 시)"""
+        try:
+            for claim_file in self.config.claims_dir.glob("*.json"):
+                try:
+                    with open(claim_file, 'r', encoding='utf-8') as f:
+                        claim = FrameClaim.from_dict(json.load(f))
+                        if claim.worker_id == self.worker.worker_id:
+                            claim_file.unlink(missing_ok=True)
+                except:
+                    pass
+        except:
+            pass
+
+    def delete_job(self, job_id: str):
+        """작업 삭제"""
+        try:
+            # 작업 파일 삭제
+            job_file = self.config.jobs_dir / f"{job_id}.json"
+            job_file.unlink(missing_ok=True)
+
+            # 관련 클레임 삭제
+            for claim_file in self.config.claims_dir.glob(f"{job_id}_*.json"):
+                claim_file.unlink(missing_ok=True)
+
+            # 관련 완료 파일 삭제
+            for done_file in self.config.completed_dir.glob(f"{job_id}_*.done"):
+                done_file.unlink(missing_ok=True)
+        except Exception as e:
+            pass
+
+    def reset_job(self, job_id: str):
+        """작업 리셋 (클레임 및 완료 정보 초기화)"""
+        try:
+            # 클레임 삭제
+            for claim_file in self.config.claims_dir.glob(f"{job_id}_*.json"):
+                claim_file.unlink(missing_ok=True)
+
+            # 완료 파일 삭제
+            for done_file in self.config.completed_dir.glob(f"{job_id}_*.done"):
+                done_file.unlink(missing_ok=True)
+        except Exception as e:
+            pass
+
+    def mark_job_completed(self, job_id: str):
+        """작업을 완료로 표시 (모든 프레임 완료 처리)"""
+        try:
+            # 작업 정보 가져오기
+            job_file = self.config.jobs_dir / f"{job_id}.json"
+            if not job_file.exists():
+                return
+
+            with open(job_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                job = RenderJob.from_dict(data)
+
+            # 모든 프레임을 완료로 표시
+            for frame_idx in range(job.start_frame, job.end_frame + 1):
+                for eye in job.eyes:
+                    if not self.is_frame_completed(job_id, frame_idx, eye):
+                        completed_file = self.config.completed_dir / f"{job_id}_{frame_idx:06d}_{eye}.done"
+                        with open(completed_file, 'w') as f:
+                            f.write("manual_complete")
+
+            # 모든 클레임 해제
+            for claim_file in self.config.claims_dir.glob(f"{job_id}_*.json"):
+                claim_file.unlink(missing_ok=True)
+        except Exception as e:
+            pass

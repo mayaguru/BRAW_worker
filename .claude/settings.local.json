@@ -30,7 +30,12 @@
       "Bash(else echo \"파일 없음\")",
       "Bash(fi)",
       "Bash(reg query:*)",
-      "Bash(uv sync:*)"
+      "Bash(uv sync:*)",
+      "Bash(cmd /c \"dir /s /b \"\"C:\\Program Files (x86)\\Windows Kits\\10\\bin\\*midl.exe\"\" 2>nul\")",
+      "Bash(cmd /c rebuild.bat:*)",
+      "Bash(cmd /c \"where /R \"\"C:\\Program Files (x86)\\Windows Kits\"\" midl.exe 2>nul\")",
+      "Bash(cmd /c \"cd /d p:\\00-GIGA\\BRAW_CLI\\braw_batch_ui &amp;&amp; uv run python -m braw_batch_ui.farm_ui\")",
+      "Bash(cmd /c \"cd /d p:\\00-GIGA\\BRAW_CLI\\braw_batch_ui && uv run python -m braw_batch_ui.farm_ui\")"
     ],
     "deny": [],
     "ask": []
