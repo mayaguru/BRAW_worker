@@ -161,16 +161,28 @@ auto decode_and_write = [&](braw::StereoView view, const std::filesystem::path& 
     };
 
     if (args->eye_mode == EyeMode::kBoth) {
-        std::cout << "[DEBUG] 11. Processing Both eyes\n";
+        std::cout << "[DEBUG] 11. Processing Both eyes (sequential)\n";
         const auto left_path = build_stereo_path(args->output_path, "_L");
         const auto right_path = build_stereo_path(args->output_path, "_R");
         std::cout << "[DEBUG] 12. Paths: L=" << left_path << ", R=" << right_path << "\n";
+
+        // Process LEFT first
+        std::cout << "[DEBUG] 13. Processing LEFT eye...\n";
         if (!decode_and_write(braw::StereoView::kLeft, left_path)) {
             return 1;
         }
+        std::cout << "[DEBUG] 14. LEFT eye completed\n";
+
+        // Flush jobs before processing RIGHT
+        std::cout << "[DEBUG] 15. Flushing jobs before RIGHT eye...\n";
+        decoder.flush_jobs();
+        std::cout << "[DEBUG] 16. Jobs flushed, starting RIGHT eye...\n";
+
+        // Process RIGHT
         if (!decode_and_write(braw::StereoView::kRight, right_path)) {
             return 1;
         }
+        std::cout << "[DEBUG] 17. RIGHT eye completed\n";
     } else {
         std::cout << "[DEBUG] 11. Processing single eye\n";
         const braw::StereoView view =
@@ -180,9 +192,9 @@ auto decode_and_write = [&](braw::StereoView view, const std::filesystem::path& 
         }
     }
 
-    std::cout << "[DEBUG] 13. Flushing jobs...\n";
+    std::cout << "[DEBUG] 18. Final flush...\n";
     decoder.flush_jobs();
-    std::cout << "[DEBUG] 14. Jobs flushed\n";
+    std::cout << "[DEBUG] 19. Final flush completed\n";
 
     if (info) {
         const char* format = (args->format == OutputFormat::kEXR) ? "EXR (f16 DWAA45)" : "PPM";
