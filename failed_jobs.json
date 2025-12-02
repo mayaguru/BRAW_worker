@@ -1,0 +1,18 @@
+[
+  {
+    "frame_idx": 11,
+    "eye_mode": "right",
+    "output_file": "D:\\_DEV\\Braw\\export\\aaa\\frame_R_0011.exr",
+    "clip_path": "D:\\_DEV\\Braw\\A001_11051030_C001.braw",
+    "attempts": 3,
+    "error_msg": "exit: 3221225477"
+  },
+  {
+    "frame_idx": 17,
+    "eye_mode": "right",
+    "output_file": "D:\\_DEV\\Braw\\export\\aaa\\frame_R_0017.exr",
+    "clip_path": "D:\\_DEV\\Braw\\A001_11051030_C001.braw",
+    "attempts": 1,
+    "error_msg": "exit: 3221225477"
+  }
+]

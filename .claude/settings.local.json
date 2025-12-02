@@ -14,7 +14,15 @@
       "Bash(cmd /c \"braw_cli.exe ..\\..\\A001_11051030_C001.braw test.exr 0 both\")",
       "Bash(timeout 10 build/bin/braw_cli.exe:*)",
       "Bash(timeout 20 build/bin/braw_cli.exe:*)",
-      "Bash(timeout 10:*)"
+      "Bash(timeout 10:*)",
+      "Bash(cmd /c \"d:\\_DEV\\Braw\\export_stereo.bat A001_11051030_C001.braw export 0 29\")",
+      "Bash(uv init:*)",
+      "Bash(uv add:*)",
+      "Bash(cmd /c run_batch_ui.bat)",
+      "Bash(uv run:*)",
+      "Bash(tasklist:*)",
+      "Bash(cat:*)",
+      "Bash(iconv:*)"
     ],
     "deny": [],
     "ask": []
