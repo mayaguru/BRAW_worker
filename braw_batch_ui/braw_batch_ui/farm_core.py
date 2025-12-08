@@ -13,11 +13,14 @@ from datetime import datetime
 import threading
 import psutil
 
+from config import settings
+
 
 class FarmConfig:
-    """렌더팜 설정"""
-    def __init__(self, farm_root: str = "P:/00-GIGA/BRAW_CLI"):
-        self.farm_root = Path(farm_root)
+    """렌더팜 설정 (settings에서 가져옴)"""
+    def __init__(self, farm_root: str = None):
+        # settings에서 farm_root 사용
+        self.farm_root = Path(settings.farm_root) if farm_root is None else Path(farm_root)
         self.jobs_dir = self.farm_root / "jobs"
         self.claims_dir = self.farm_root / "claims"
         self.workers_dir = self.farm_root / "workers"
@@ -167,7 +170,8 @@ class FrameClaim:
 class FarmManager:
     """렌더팜 관리자"""
 
-    def __init__(self, farm_root: str = "P:/00-GIGA/BRAW_CLI"):
+    def __init__(self, farm_root: str = None):
+        # farm_root가 None이면 settings.farm_root 사용
         self.config = FarmConfig(farm_root)
         self.worker = WorkerInfo()
         self.heartbeat_thread = None

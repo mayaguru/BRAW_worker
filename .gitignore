@@ -12,3 +12,6 @@ completed/*
 workers/*
 jobs/*
 *.pyc
+_Test_propjec/*
+
+

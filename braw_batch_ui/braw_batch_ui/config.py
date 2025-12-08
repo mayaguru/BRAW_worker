@@ -15,10 +15,17 @@ class FarmSettings:
     def __init__(self):
         # 기본 설정
         self.farm_root = "P:/00-GIGA/BRAW_CLI"  # 공용 렌더팜 저장소
+        self.cli_path = "P:/00-GIGA/BRAW_CLI/build/bin/braw_cli.exe"  # CLI 실행 파일 경로
         self.parallel_workers = 16
 
-        # 설정 파일 경로 (로컬)
-        self.config_file = Path.home() / ".braw_farm" / "config.json"
+        # 설정 파일 경로 (로컬 - 내 문서)
+        from pathlib import Path
+        import os
+
+        # Windows: C:\Users\사용자명\Documents\BRAW Farm\config.json
+        # 다른 OS: ~/Documents/BRAW Farm/config.json
+        documents = Path.home() / "Documents"
+        self.config_file = documents / "BRAW Farm" / "config.json"
 
         # 설정 로드
         self.load()
@@ -30,6 +37,7 @@ class FarmSettings:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.farm_root = data.get("farm_root", self.farm_root)
+                    self.cli_path = data.get("cli_path", self.cli_path)
                     self.parallel_workers = data.get("parallel_workers", self.parallel_workers)
             except Exception as e:
                 print(f"설정 로드 실패: {e}")
@@ -43,6 +51,7 @@ class FarmSettings:
             # 설정 저장
             data = {
                 "farm_root": self.farm_root,
+                "cli_path": self.cli_path,
                 "parallel_workers": self.parallel_workers
             }
 
@@ -55,6 +64,7 @@ class FarmSettings:
         """딕셔너리로 변환"""
         return {
             "farm_root": self.farm_root,
+            "cli_path": self.cli_path,
             "parallel_workers": self.parallel_workers
         }
 

@@ -47,6 +47,17 @@ class SettingsDialog(QDialog):
         farm_root_layout.addWidget(browse_btn)
         layout.addLayout(farm_root_layout)
 
+        # CLI 실행 파일 경로
+        cli_path_layout = QHBoxLayout()
+        cli_path_layout.addWidget(QLabel("CLI 실행 파일:"))
+        self.cli_path_input = QLineEdit(settings.cli_path)
+        cli_browse_btn = QPushButton("📁")
+        cli_browse_btn.setMaximumWidth(40)
+        cli_browse_btn.clicked.connect(self.browse_cli_path)
+        cli_path_layout.addWidget(self.cli_path_input)
+        cli_path_layout.addWidget(cli_browse_btn)
+        layout.addLayout(cli_path_layout)
+
         # 병렬 처리 수
         parallel_layout = QHBoxLayout()
         parallel_layout.addWidget(QLabel("기본 병렬 처리:"))
@@ -74,12 +85,23 @@ class SettingsDialog(QDialog):
         if folder:
             self.farm_root_input.setText(folder)
 
+    def browse_cli_path(self):
+        """CLI 실행 파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "CLI 실행 파일 선택",
+            "",
+            "실행 파일 (*.exe);;모든 파일 (*.*)"
+        )
+        if file_path:
+            self.cli_path_input.setText(file_path)
+
     def save_settings(self):
         """설정 저장"""
         settings.farm_root = self.farm_root_input.text()
+        settings.cli_path = self.cli_path_input.text()
         settings.parallel_workers = self.parallel_spin.value()
         settings.save()
-        QMessageBox.information(self, "완료", "설정이 저장되었습니다.\n재시작 후 적용됩니다.")
         self.accept()
 
 
@@ -347,33 +369,22 @@ class FarmUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        # 설정에서 farm_root 가져오기
-        self.farm_manager = FarmManager(farm_root=settings.farm_root)
+        # FarmManager는 자동으로 settings.farm_root 사용
+        self.farm_manager = FarmManager()
         self.worker_thread = None
         self.status_thread = None
 
-        # CLI 경로 찾기 (여러 위치 시도)
-        possible_paths = [
-            Path(__file__).parent.parent.parent / "build" / "bin" / "braw_cli.exe",
-            Path(__file__).parent.parent.parent / "build" / "src" / "app" / "Release" / "braw_cli.exe",
-            Path(__file__).parent.parent / "build" / "bin" / "braw_cli.exe",  # 공유 폴더 build/bin
-            Path(__file__).parent.parent / "braw_cli.exe",  # 공유 폴더 루트
-            Path(__file__).parent.parent.parent / "braw_cli.exe",  # 상위 폴더
-        ]
+        # CLI 경로를 설정에서 가져오기
+        self.cli_path = Path(settings.cli_path)
 
-        self.cli_path = None
-        for path in possible_paths:
-            if path.exists():
-                self.cli_path = path
-                break
-
-        if not self.cli_path:
-            QMessageBox.critical(None, "오류",
-                "braw_cli.exe를 찾을 수 없습니다.\n\n"
-                "다음 위치 중 하나에 배치하세요:\n"
-                "1. braw_batch_ui/braw_cli.exe\n"
-                "2. P:/00-GIGA/BRAW_CLI/braw_cli.exe")
-            sys.exit(1)
+        # CLI 파일 존재 확인
+        if not self.cli_path.exists():
+            QMessageBox.warning(
+                None,
+                "경고",
+                f"CLI 실행 파일을 찾을 수 없습니다:\n{self.cli_path}\n\n"
+                "설정(⚙️)에서 올바른 경로를 지정하세요."
+            )
 
         self.init_ui()
 
@@ -767,13 +778,20 @@ class FarmUI(QMainWindow):
         """설정 다이얼로그 표시"""
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
-            # 설정이 변경되었으므로 병렬 처리 수 업데이트
+            # 설정 즉시 적용
             self.parallel_spin.setValue(settings.parallel_workers)
-            # farm_root가 변경된 경우 알림
+            self.cli_path = Path(settings.cli_path)
+
+            # FarmManager의 경로도 업데이트
+            self.farm_manager = FarmManager()
+
             QMessageBox.information(
                 self,
-                "설정 저장됨",
-                f"설정이 저장되었습니다.\n공용 저장소: {settings.farm_root}\n병렬 처리: {settings.parallel_workers}"
+                "설정 적용됨",
+                f"설정이 저장되고 적용되었습니다.\n\n"
+                f"공용 저장소: {settings.farm_root}\n"
+                f"CLI 경로: {settings.cli_path}\n"
+                f"병렬 처리: {settings.parallel_workers}"
             )
 
     def append_worker_log(self, text):
