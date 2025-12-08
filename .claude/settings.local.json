@@ -60,7 +60,9 @@
       "Bash(grep:*)",
       "Bash(tree:*)",
       "Bash(find:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(timeout 120 ./braw_cli.exe:*)",
+      "Bash(timeout 300 ./braw_cli.exe:*)"
     ],
     "deny": [],
     "ask": []

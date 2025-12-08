@@ -1,14 +1,17 @@
 #include "braw_decoder.h"
 
 #include <cmath>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <thread>
 
 #ifdef BRAW_SDK_AVAILABLE
 #include <algorithm>
-#include <condition_variable>
-#include <mutex>
 #include <string>
 
 #include <Windows.h>
@@ -32,90 +35,99 @@ void log_hresult(const char* message, HRESULT hr) {
     std::cerr << message << " (HRESULT=0x" << std::hex << hr << std::dec << ")\n";
 }
 
-class FrameDecodeCallback final : public IBlackmagicRawCallback {
+// SDK ProcessClipCPU 패턴: 동기식 단일 프레임 처리용 콜백
+// 비동기 멀티프레임이 아닌, 한 프레임씩 동기 처리
+class SyncFrameCallback final : public IBlackmagicRawCallback {
   public:
-    explicit FrameDecodeCallback(FrameBuffer& buffer) : buffer_(buffer) {}
-    FrameDecodeCallback(const FrameDecodeCallback&) = delete;
-    FrameDecodeCallback& operator=(const FrameDecodeCallback&) = delete;
+    explicit SyncFrameCallback() = default;
 
-    bool wait_until_completed() {
-        std::unique_lock lock(mutex_);
-        cv_.wait(lock, [this]() { return completed_; });
-        return SUCCEEDED(result_);
+    void reset() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        completed_ = false;
+        succeeded_ = false;
+        result_buffer_ = nullptr;
+    }
+
+    void set_target_buffer(FrameBuffer* buffer) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result_buffer_ = buffer;
+    }
+
+    bool wait_for_completion(int timeout_ms = 30000) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                           [this] { return completed_; });
+    }
+
+    bool succeeded() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return succeeded_;
     }
 
     void ReadComplete(IBlackmagicRawJob* job, HRESULT result, IBlackmagicRawFrame* frame) override {
-        HRESULT hr = result;
         IBlackmagicRawJob* decode_job = nullptr;
 
-        if (SUCCEEDED(hr)) {
-            hr = frame->SetResourceFormat(blackmagicRawResourceFormatRGBAF32);
+        if (SUCCEEDED(result)) {
+            result = frame->SetResourceFormat(blackmagicRawResourceFormatRGBF32);
         }
 
-        if (SUCCEEDED(hr)) {
-            hr = frame->CreateJobDecodeAndProcessFrame(nullptr, nullptr, &decode_job);
+        if (SUCCEEDED(result)) {
+            result = frame->CreateJobDecodeAndProcessFrame(nullptr, nullptr, &decode_job);
         }
 
-        if (SUCCEEDED(hr) && decode_job) {
-            hr = decode_job->Submit();
+        if (SUCCEEDED(result) && decode_job) {
+            result = decode_job->Submit();
         }
 
-        if (decode_job) {
-            decode_job->Release();
-        }
-        if (job) {
-            job->Release();
+        if (FAILED(result)) {
+            if (decode_job) {
+                decode_job->Release();
+            }
+            // 실패 시 완료 신호
+            std::lock_guard<std::mutex> lock(mutex_);
+            succeeded_ = false;
+            completed_ = true;
+            cv_.notify_all();
         }
 
-        if (FAILED(hr)) {
-            finish(hr);
-        }
+        job->Release();
     }
 
     void ProcessComplete(IBlackmagicRawJob* job, HRESULT result,
                          IBlackmagicRawProcessedImage* processedImage) override {
-        HRESULT hr = result;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        void* resource = nullptr;
-        BlackmagicRawResourceFormat format = blackmagicRawResourceFormatRGBAF32;
+        bool success = false;
 
-        if (SUCCEEDED(hr)) {
-            hr = processedImage->GetWidth(&width);
-        }
-        if (SUCCEEDED(hr)) {
-            hr = processedImage->GetHeight(&height);
-        }
-        if (SUCCEEDED(hr)) {
-            hr = processedImage->GetResource(&resource);
-        }
-        if (SUCCEEDED(hr)) {
-            hr = processedImage->GetResourceFormat(&format);
-        }
+        if (SUCCEEDED(result)) {
+            uint32_t width = 0;
+            uint32_t height = 0;
+            void* resource = nullptr;
 
-        if (SUCCEEDED(hr)) {
-            const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-            buffer_.format = FramePixelFormat::kRGBFloat32;
-            buffer_.resize(width, height);
+            if (SUCCEEDED(processedImage->GetWidth(&width)) &&
+                SUCCEEDED(processedImage->GetHeight(&height)) &&
+                SUCCEEDED(processedImage->GetResource(&resource))) {
 
-            auto span = buffer_.as_span();
-            float* dst = span.data();
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (result_buffer_) {
+                    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+                    result_buffer_->format = FramePixelFormat::kRGBFloat32;
+                    result_buffer_->resize(width, height);
 
-            const float* src = static_cast<const float*>(resource);
-            const uint32_t src_stride = (format == blackmagicRawResourceFormatRGBF32) ? 3u : 4u;
-
-            for (size_t i = 0; i < pixel_count; ++i) {
-                dst[i * 3 + 0] = src[i * src_stride + 0];
-                dst[i * 3 + 1] = src[i * src_stride + 1];
-                dst[i * 3 + 2] = src[i * src_stride + 2];
+                    auto span = result_buffer_->as_span();
+                    std::memcpy(span.data(), resource, pixel_count * 3 * sizeof(float));
+                    success = true;
+                }
             }
         }
 
-        if (job) {
-            job->Release();
-        }
+        job->Release();
 
-        finish(hr);
+        // 완료 신호
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            succeeded_ = success;
+            completed_ = true;
+        }
+        cv_.notify_all();
     }
 
     void DecodeComplete(IBlackmagicRawJob*, HRESULT) override {}
@@ -138,26 +150,14 @@ class FrameDecodeCallback final : public IBlackmagicRawCallback {
     ULONG STDMETHODCALLTYPE Release() override { return 1; }
 
   private:
-    void finish(HRESULT hr) {
-        {
-            std::lock_guard lock(mutex_);
-            if (completed_) {
-                return;
-            }
-            completed_ = true;
-            result_ = hr;
-        }
-        cv_.notify_all();
-    }
-
-    FrameBuffer& buffer_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cv_;
     bool completed_{false};
-    HRESULT result_{E_FAIL};
+    bool succeeded_{false};
+    FrameBuffer* result_buffer_{nullptr};
 };
 
-#endif
+#endif  // BRAW_SDK_AVAILABLE
 
 #ifndef BRAW_SDK_AVAILABLE
 void fill_dummy_pattern(const ClipInfo& info, FrameBuffer& out_buffer) {
@@ -192,6 +192,10 @@ struct BrawDecoder::Impl {
     ComThreadingModel threading_model{ComThreadingModel::kMultiThreaded};
     std::wstring sdk_library_dir;
 
+    // 콜백은 클립 열 때 한 번만 설정
+    SyncFrameCallback callback;
+    bool callback_set{false};
+
     bool ensure_com() {
         if (com_initialized) {
             return true;
@@ -203,8 +207,6 @@ struct BrawDecoder::Impl {
 
         const HRESULT hr = CoInitializeEx(nullptr, coinit_flags);
         if (hr == RPC_E_CHANGED_MODE || hr == S_FALSE) {
-            // 이미 다른 곳에서 COM이 초기화됨 (Qt 등)
-            // 문제 없으니 계속 진행
             return true;
         }
         if (FAILED(hr)) {
@@ -261,11 +263,13 @@ struct BrawDecoder::Impl {
             immersive_clip->Release();
             immersive_clip = nullptr;
         }
+        callback_set = false;
     }
 
     void release_all() {
         release_clip();
         if (codec) {
+            codec->FlushJobs();
             codec->Release();
             codec = nullptr;
         }
@@ -354,6 +358,14 @@ bool BrawDecoder::open_clip(const std::filesystem::path& clip_path) {
         immersive_clip->Release();
     }
 
+    // 콜백은 클립 열 때 한 번만 설정 (SDK 패턴)
+    HRESULT cb_hr = impl_->codec->SetCallback(&impl_->callback);
+    if (FAILED(cb_hr)) {
+        log_hresult("콜백 설정 실패", cb_hr);
+        return false;
+    }
+    impl_->callback_set = true;
+
     impl_->info = info;
     return true;
 #else
@@ -364,7 +376,7 @@ bool BrawDecoder::open_clip(const std::filesystem::path& clip_path) {
     info.frame_count = 1;
     info.frame_rate = 24.0;
     impl_->info = info;
-    std::cerr << "BRAW SDK가 비활성화되어 있으므로 실제 디코딩이 불가합니다. 샘플 데이터를 사용합니다.\n";
+    std::cerr << "BRAW SDK가 비활성화되어 있으므로 실제 디코딩이 불가합니다.\n";
     return true;
 #endif
 }
@@ -389,35 +401,37 @@ bool BrawDecoder::decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, St
         return false;
     }
 
+    if (!impl_->callback_set) {
+        std::cerr << "콜백이 설정되지 않았습니다.\n";
+        return false;
+    }
+
     if (impl_->info && frame_index >= impl_->info->frame_count) {
         std::cerr << "프레임 인덱스가 범위를 벗어났습니다.\n";
         return false;
     }
 
-    FrameDecodeCallback callback(out_buffer);
-    HRESULT hr = impl_->codec->SetCallback(&callback);
-    if (FAILED(hr)) {
-        log_hresult("콜백 설정 실패", hr);
-        return false;
-    }
+    // 콜백 상태 초기화 및 버퍼 설정
+    impl_->callback.reset();
+    impl_->callback.set_target_buffer(&out_buffer);
 
+    // 읽기 작업 생성
     IBlackmagicRawJob* read_job = nullptr;
+    HRESULT hr;
+
     if (impl_->immersive_clip) {
         const BlackmagicRawImmersiveVideoTrack track =
             (view == StereoView::kRight) ? blackmagicRawImmersiveVideoTrackRight
                                          : blackmagicRawImmersiveVideoTrackLeft;
-        hr = impl_->immersive_clip->CreateJobImmersiveReadFrame(track,
-                                                               static_cast<unsigned long long>(frame_index),
-                                                               &read_job);
+        hr = impl_->immersive_clip->CreateJobImmersiveReadFrame(
+            track, static_cast<unsigned long long>(frame_index), &read_job);
     } else {
-        if (view == StereoView::kRight) {
-            std::cerr << "우안 트랙이 없는 클립입니다. 좌안으로 디코딩합니다.\n";
-        }
-        hr = impl_->clip->CreateJobReadFrame(static_cast<unsigned long long>(frame_index), &read_job);
+        hr = impl_->clip->CreateJobReadFrame(
+            static_cast<unsigned long long>(frame_index), &read_job);
     }
+
     if (FAILED(hr) || !read_job) {
         log_hresult("프레임 읽기 작업 생성 실패", hr);
-        impl_->codec->SetCallback(nullptr);
         return false;
     }
 
@@ -425,19 +439,16 @@ bool BrawDecoder::decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, St
     if (FAILED(hr)) {
         log_hresult("프레임 읽기 작업 제출 실패", hr);
         read_job->Release();
-        impl_->codec->SetCallback(nullptr);
         return false;
     }
 
-    impl_->codec->FlushJobs();
-    impl_->codec->SetCallback(nullptr);
-
-    if (!callback.wait_until_completed()) {
-        std::cerr << "프레임 처리 실패\n";
+    // 콜백 완료 대기
+    if (!impl_->callback.wait_for_completion(30000)) {
+        std::cerr << "프레임 디코딩 타임아웃\n";
         return false;
     }
 
-    return true;
+    return impl_->callback.succeeded();
 #endif
 }
 
