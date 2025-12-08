@@ -459,12 +459,14 @@ class WorkerThread(QThread):
 
         # 워커 상태 및 현재 작업 정보 업데이트
         self.farm_manager.worker.status = "active"
+        # 작업이 바뀌면 카운터 리셋
+        if self.farm_manager.worker.current_job_id != job.job_id:
+            self.farm_manager.worker.current_processed = 0
+            # 전체 프레임 수 계산 (프레임 범위 * eye 개수)
+            frame_count = (job.end_frame - job.start_frame + 1) * len(job.eyes)
+            self.farm_manager.worker.current_total_frames = frame_count
         self.farm_manager.worker.current_job_id = job.job_id
         self.farm_manager.worker.current_clip_name = Path(job.clip_path).name
-        self.farm_manager.worker.current_processed = 0
-        # 전체 프레임 수 계산 (프레임 범위 * eye 개수)
-        frame_count = (job.end_frame - job.start_frame + 1) * len(job.eyes)
-        self.farm_manager.worker.current_total_frames = frame_count
         self.farm_manager.update_worker()
 
         # 프레임 찾아서 처리
@@ -478,9 +480,8 @@ class WorkerThread(QThread):
                 tasks.append(result)
 
         if not tasks:
-            # 처리할 프레임이 없으면 idle로 변경
+            # 처리할 프레임이 없으면 idle로 변경 (처리 수는 유지)
             self.farm_manager.worker.status = "idle"
-            self.farm_manager.worker.current_total_frames = 0
             self.farm_manager.update_worker()
             return
 
@@ -544,12 +545,11 @@ class WorkerThread(QThread):
         self.log_signal.emit(f"  ✗ 실패: {self.current_job_stats['failed']}")
         self.log_signal.emit(f"  전체 누적 - 성공: {self.total_success}, 실패: {self.total_failed}")
 
-        # 작업 완료 후 워커 정보 초기화
+        # 작업 완료 후 워커 정보 업데이트 (처리 수는 유지)
         self.farm_manager.worker.status = "idle"
         self.farm_manager.worker.current_job_id = ""
         self.farm_manager.worker.current_clip_name = ""
-        self.farm_manager.worker.current_processed = 0
-        self.farm_manager.worker.current_total_frames = 0
+        # current_processed와 current_total_frames는 유지 (마지막 처리 결과 표시)
         self.farm_manager.update_worker()
 
     def process_frame(self, job: RenderJob, frame_idx: int, eye: str) -> bool:
@@ -1512,10 +1512,14 @@ class FarmUI(QMainWindow):
             self.workers_table.setItem(i, 5, QTableWidgetItem(worker.current_clip_name if worker.current_clip_name else "-"))
 
             # 처리 프레임 수 (현재/전체)
-            if worker.current_processed > 0 and worker.current_total_frames > 0:
+            if worker.current_total_frames > 0:
                 processed_text = f"{worker.current_processed}/{worker.current_total_frames}"
                 processed_item = QTableWidgetItem(processed_text)
-                processed_item.setForeground(QColor(76, 175, 80))  # 녹색
+                # 완료되면 녹색, 진행중이면 주황색
+                if worker.current_processed >= worker.current_total_frames:
+                    processed_item.setForeground(QColor(76, 175, 80))  # 녹색
+                else:
+                    processed_item.setForeground(QColor(255, 152, 0))  # 주황색
             else:
                 processed_item = QTableWidgetItem("-")
             self.workers_table.setItem(i, 6, processed_item)
