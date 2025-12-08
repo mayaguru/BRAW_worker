@@ -17,6 +17,7 @@ class FarmSettings:
         self.farm_root = "P:/00-GIGA/BRAW_CLI"  # 공용 렌더팜 저장소
         self.cli_path = "P:/00-GIGA/BRAW_CLI/build/bin/braw_cli.exe"  # CLI 실행 파일 경로
         self.parallel_workers = 16
+        self.max_retries = 5  # 최대 재시도 횟수
         self.last_output_folder = ""  # 마지막으로 사용한 출력 폴더
 
         # OCIO 설정
@@ -47,6 +48,7 @@ class FarmSettings:
                     self.farm_root = data.get("farm_root", self.farm_root)
                     self.cli_path = data.get("cli_path", self.cli_path)
                     self.parallel_workers = data.get("parallel_workers", self.parallel_workers)
+                    self.max_retries = data.get("max_retries", self.max_retries)
                     self.last_output_folder = data.get("last_output_folder", self.last_output_folder)
                     # OCIO 설정
                     self.ocio_config_path = data.get("ocio_config_path", self.ocio_config_path)
@@ -68,6 +70,7 @@ class FarmSettings:
                 "farm_root": self.farm_root,
                 "cli_path": self.cli_path,
                 "parallel_workers": self.parallel_workers,
+                "max_retries": self.max_retries,
                 "last_output_folder": self.last_output_folder,
                 "ocio_config_path": self.ocio_config_path,
                 "color_input_space": self.color_input_space,

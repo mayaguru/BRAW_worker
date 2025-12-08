@@ -301,6 +301,17 @@ class SettingsDialog(QDialog):
         parallel_layout.addStretch()
         layout.addLayout(parallel_layout)
 
+        # 최대 재시도 횟수
+        retry_layout = QHBoxLayout()
+        retry_layout.addWidget(QLabel("최대 재시도:"))
+        self.retry_spin = QSpinBox()
+        self.retry_spin.setRange(1, 20)
+        self.retry_spin.setValue(settings.max_retries)
+        self.retry_spin.setToolTip("프레임 처리 실패 시 재시도 횟수 (기본: 5)")
+        retry_layout.addWidget(self.retry_spin)
+        retry_layout.addStretch()
+        layout.addLayout(retry_layout)
+
         # 버튼
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("저장")
@@ -334,6 +345,7 @@ class SettingsDialog(QDialog):
         settings.farm_root = self.farm_root_input.text()
         settings.cli_path = self.cli_path_input.text()
         settings.parallel_workers = self.parallel_spin.value()
+        settings.max_retries = self.retry_spin.value()
         settings.save()
         self.accept()
 
@@ -522,10 +534,8 @@ class WorkerThread(QThread):
                 success = future.result()
 
                 if success:
-                    # 최종 확인: 실제 파일이 존재하는지 다시 체크
-                    output_file = self.farm_manager.get_output_file_path(job, frame_idx, eye)
-                    if output_file.exists():
-                        self.farm_manager.mark_completed(job.job_id, frame_idx, eye)
+                    # 파일 존재 확인 + 완료 표시 (원자적으로 처리)
+                    if self.farm_manager.mark_completed_if_file_exists(job, frame_idx, eye):
                         self.farm_manager.worker.frames_completed += 1
                         self.farm_manager.worker.current_processed += 1
                         self.current_job_stats["success"] += 1
@@ -541,10 +551,11 @@ class WorkerThread(QThread):
                 if not success:
                     # 재시도 로직
                     retry_count = retry_tasks[(frame_idx, eye)]
-                    if retry_count < 2:  # 최대 2번 재시도
+                    max_retries = settings.max_retries
+                    if retry_count < max_retries:
                         retry_tasks[(frame_idx, eye)] += 1
                         self.current_job_stats["retried"] += 1
-                        self.log_signal.emit(f"  ⟳ [{frame_idx}] {eye.upper()} 재시도 ({retry_count + 1}/2)")
+                        self.log_signal.emit(f"  ⟳ [{frame_idx}] {eye.upper()} 재시도 ({retry_count + 1}/{max_retries})")
                         # 재시도 작업 제출
                         new_future = executor.submit(self.process_frame, job, frame_idx, eye)
                         futures[new_future] = (frame_idx, eye)
@@ -868,8 +879,9 @@ class FarmUI(QMainWindow):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 상단 툴바
+        # 상단 툴바 (고정 높이)
         toolbar = QWidget()
+        toolbar.setFixedHeight(50)  # 타이틀 바 높이 고정
         toolbar.setStyleSheet("background-color: #2a2a2a; border-bottom: 2px solid #505050;")
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(15, 8, 15, 8)
@@ -934,8 +946,8 @@ class FarmUI(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setSpacing(15)  # 섹션 간 간격
         right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.addWidget(self.create_monitor_section())
-        right_layout.addWidget(self.create_log_section())
+        right_layout.addWidget(self.create_monitor_section(), stretch=2)  # 모니터링 섹션 2 비율
+        right_layout.addWidget(self.create_log_section(), stretch=1)  # 로그 섹션 1 비율
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
@@ -976,7 +988,8 @@ class FarmUI(QMainWindow):
         # 선택된 파일 목록
         self.file_list_widget = QListWidget()
         self.file_list_widget.setMaximumHeight(120)
-        self.file_list_widget.setToolTip("선택된 BRAW 파일 목록\n클릭: 프레임 범위 업데이트 | 더블클릭: 제거")
+        self.file_list_widget.setSelectionMode(QListWidget.ExtendedSelection)  # Ctrl+클릭 다중 선택
+        self.file_list_widget.setToolTip("선택된 BRAW 파일 목록\n클릭: 프레임 범위 표시\nCtrl+클릭: 다중 선택 후 프레임 일괄 적용\n더블클릭: 제거")
         self.file_list_widget.itemClicked.connect(self.on_file_selected)
         self.file_list_widget.itemDoubleClicked.connect(self.remove_file_from_list)
         self.file_list_widget.setStyleSheet("""
@@ -1003,8 +1016,10 @@ class FarmUI(QMainWindow):
 
         layout.addWidget(file_area)
 
-        # 저장된 파일 경로 리스트
-        self.selected_files = []
+        # 저장된 파일 정보 딕셔너리 {파일경로: {"start": 시작, "end": 끝, "total": 전체프레임수}}
+        self.selected_files = []  # 순서 유지용 리스트
+        self.file_frame_ranges = {}  # 파일별 프레임 범위
+        self.current_selected_file = None  # 현재 선택된 파일
 
         # 출력 폴더
         output_path_layout = QHBoxLayout()
@@ -1025,11 +1040,13 @@ class FarmUI(QMainWindow):
         frame_layout = QHBoxLayout()
         self.start_spin = QSpinBox()
         self.start_spin.setRange(0, 100000)
-        self.start_spin.setToolTip("렌더링 시작 프레임 번호 (0부터 시작)")
+        self.start_spin.setToolTip("렌더링 시작 프레임 번호 (0부터 시작)\n선택된 파일에 개별 적용됨")
+        self.start_spin.valueChanged.connect(self.on_frame_range_changed)
         self.end_spin = QSpinBox()
         self.end_spin.setRange(0, 100000)
         self.end_spin.setValue(29)
-        self.end_spin.setToolTip("렌더링 종료 프레임 번호")
+        self.end_spin.setToolTip("렌더링 종료 프레임 번호\n선택된 파일에 개별 적용됨")
+        self.end_spin.valueChanged.connect(self.on_frame_range_changed)
         frame_layout.addWidget(QLabel("프레임:"))
         frame_layout.addWidget(self.start_spin)
         frame_layout.addWidget(QLabel("~"))
@@ -1204,10 +1221,9 @@ class FarmUI(QMainWindow):
         self.workers_table = QTableWidget()
         self.workers_table.setColumnCount(8)
         self.workers_table.setHorizontalHeaderLabels(["워커 ID", "IP", "상태", "CPU", "작업 ID", "영상", "처리", "에러"])
-        self.workers_table.setMaximumHeight(150)
         self.workers_table.verticalHeader().setVisible(False)
         layout.addWidget(QLabel("👷 활성 워커"))
-        layout.addWidget(self.workers_table)
+        layout.addWidget(self.workers_table, stretch=1)  # 창 크기에 맞춰 늘어남
 
         # 작업 목록
         self.jobs_table = QTableWidget()
@@ -1218,8 +1234,9 @@ class FarmUI(QMainWindow):
         self.jobs_table.setSelectionMode(QTableWidget.ExtendedSelection)  # 다중 선택 허용
         self.jobs_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.jobs_table.customContextMenuRequested.connect(self.show_job_context_menu)
-        layout.addWidget(QLabel("📋 작업 목록"))
-        layout.addWidget(self.jobs_table)
+        self.jobs_table.cellDoubleClicked.connect(self.on_job_double_clicked)  # 더블클릭으로 프레임 수정
+        layout.addWidget(QLabel("📋 작업 목록 (더블클릭: 프레임 범위 수정)"))
+        layout.addWidget(self.jobs_table, stretch=1)  # 창 크기에 맞춰 늘어남
 
         return widget
 
@@ -1271,10 +1288,20 @@ class FarmUI(QMainWindow):
             # 중복 체크
             if file_path not in self.selected_files:
                 self.selected_files.append(file_path)
-                # 파일 이름만 표시
+
+                # 프레임 범위 자동 감지하여 저장
+                total_frames = self.get_clip_frame_count(file_path)
+                self.file_frame_ranges[file_path] = {
+                    "start": 0,
+                    "end": total_frames - 1 if total_frames > 0 else 29,
+                    "total": total_frames
+                }
+
+                # 파일 이름 + 프레임 범위 표시
                 from pathlib import Path
                 file_name = Path(file_path).name
-                self.file_list_widget.addItem(f"{file_name}")
+                frame_info = self.file_frame_ranges[file_path]
+                self.file_list_widget.addItem(f"{file_name} [{frame_info['start']}-{frame_info['end']}]")
                 added_count += 1
 
                 # 첫 번째로 추가된 파일 기억
@@ -1283,27 +1310,75 @@ class FarmUI(QMainWindow):
 
         self.update_file_count()
 
-        # 첫 번째 파일의 프레임 범위 자동 감지
+        # 첫 번째 파일 선택
         if first_added:
-            self.auto_detect_frame_range(first_added)
+            self.current_selected_file = first_added
+            frame_info = self.file_frame_ranges[first_added]
+            self.start_spin.blockSignals(True)
+            self.end_spin.blockSignals(True)
+            self.start_spin.setValue(frame_info["start"])
+            self.end_spin.setValue(frame_info["end"])
+            self.start_spin.blockSignals(False)
+            self.end_spin.blockSignals(False)
+            # 첫 번째 아이템 선택
+            self.file_list_widget.setCurrentRow(0)
 
     def on_file_selected(self, item):
-        """파일 목록에서 항목 클릭 시 프레임 범위 업데이트"""
+        """파일 목록에서 항목 클릭 시 해당 파일의 저장된 프레임 범위 표시"""
         row = self.file_list_widget.row(item)
         if 0 <= row < len(self.selected_files):
-            self.auto_detect_frame_range(self.selected_files[row])
+            file_path = self.selected_files[row]
+            self.current_selected_file = file_path
+
+            if file_path in self.file_frame_ranges:
+                frame_info = self.file_frame_ranges[file_path]
+                # 시그널 차단하여 불필요한 저장 방지
+                self.start_spin.blockSignals(True)
+                self.end_spin.blockSignals(True)
+                self.start_spin.setValue(frame_info["start"])
+                self.end_spin.setValue(frame_info["end"])
+                self.start_spin.blockSignals(False)
+                self.end_spin.blockSignals(False)
+
+    def on_frame_range_changed(self):
+        """프레임 범위 변경 시 선택된 파일(들)에 저장"""
+        start = self.start_spin.value()
+        end = self.end_spin.value()
+
+        # 선택된 항목들 가져오기
+        selected_items = self.file_list_widget.selectedItems()
+
+        if selected_items:
+            # 선택된 모든 파일에 적용
+            for item in selected_items:
+                row = self.file_list_widget.row(item)
+                if 0 <= row < len(self.selected_files):
+                    file_path = self.selected_files[row]
+                    if file_path in self.file_frame_ranges:
+                        self.file_frame_ranges[file_path]["start"] = start
+                        self.file_frame_ranges[file_path]["end"] = end
+                        # 리스트 아이템 텍스트 업데이트
+                        from pathlib import Path
+                        file_name = Path(file_path).name
+                        item.setText(f"{file_name} [{start}-{end}]")
 
     def remove_file_from_list(self, item):
         """목록에서 파일 제거"""
         row = self.file_list_widget.row(item)
         if 0 <= row < len(self.selected_files):
+            file_path = self.selected_files[row]
             del self.selected_files[row]
+            if file_path in self.file_frame_ranges:
+                del self.file_frame_ranges[file_path]
             self.file_list_widget.takeItem(row)
             self.update_file_count()
 
-            # 파일이 남아있으면 첫 번째 파일의 프레임 범위 다시 감지
+            # 파일이 남아있으면 첫 번째 파일 선택
             if len(self.selected_files) > 0:
-                self.auto_detect_frame_range(self.selected_files[0])
+                self.file_list_widget.setCurrentRow(0)
+                self.on_file_selected(self.file_list_widget.item(0))
+            else:
+                self.current_selected_file = None
 
     def update_file_count(self):
         """파일 카운트 업데이트"""
@@ -1314,10 +1389,9 @@ class FarmUI(QMainWindow):
         else:
             self.file_count_label.setStyleSheet("color: #888888; font-weight: bold; padding: 5px;")
 
-    def auto_detect_frame_range(self, clip_path):
-        """파일의 프레임 범위 자동 감지"""
+    def get_clip_frame_count(self, clip_path) -> int:
+        """클립의 총 프레임 수 반환 (실패 시 0)"""
         try:
-            # CLI로 정보 가져오기
             result = subprocess.run(
                 [str(self.cli_path), clip_path, "--info"],
                 capture_output=True,
@@ -1328,21 +1402,19 @@ class FarmUI(QMainWindow):
             )
 
             if result.returncode == 0:
-                # 출력 파싱
-                info = {}
                 for line in result.stdout.splitlines():
-                    if "=" in line and not line.startswith("[DEBUG]"):
-                        key, value = line.strip().split("=", 1)
-                        info[key] = value
-
-                # 프레임 범위 업데이트
-                if "FRAME_COUNT" in info:
-                    frame_count = int(info["FRAME_COUNT"])
-                    self.start_spin.setValue(0)
-                    self.end_spin.setValue(frame_count - 1)  # 0-based index
-        except Exception as e:
-            # 실패해도 조용히 무시 (사용자가 수동으로 설정 가능)
+                    if "FRAME_COUNT=" in line and not line.startswith("[DEBUG]"):
+                        return int(line.split("=", 1)[1])
+        except:
             pass
+        return 0
+
+    def auto_detect_frame_range(self, clip_path):
+        """파일의 프레임 범위 자동 감지 (deprecated - get_clip_frame_count 사용)"""
+        frame_count = self.get_clip_frame_count(clip_path)
+        if frame_count > 0:
+            self.start_spin.setValue(0)
+            self.end_spin.setValue(frame_count - 1)
 
     def probe_clip(self):
         """클립 정보 가져오기"""
@@ -1447,8 +1519,6 @@ class FarmUI(QMainWindow):
         separate_folders = self.separate_check.isChecked()
         clip_folder = self.clip_folder_check.isChecked()
         use_aces = self.aces_check.isChecked()
-        start_frame = self.start_spin.value()
-        end_frame = self.end_spin.value()
 
         # 각 파일마다 작업 생성
         submitted_jobs = []
@@ -1456,6 +1526,14 @@ class FarmUI(QMainWindow):
 
         for clip_path in self.selected_files:
             clip_name = Path(clip_path).stem  # 확장자 제외한 파일명
+
+            # 파일별 저장된 프레임 범위 사용 (없으면 현재 UI 값)
+            if clip_path in self.file_frame_ranges:
+                start_frame = self.file_frame_ranges[clip_path]["start"]
+                end_frame = self.file_frame_ranges[clip_path]["end"]
+            else:
+                start_frame = self.start_spin.value()
+                end_frame = self.end_spin.value()
 
             # 영상별폴더 옵션에 따라 출력 경로 결정
             if clip_folder:
@@ -1501,6 +1579,8 @@ class FarmUI(QMainWindow):
 
         # 제출 후 파일 목록 초기화
         self.selected_files.clear()
+        self.file_frame_ranges.clear()
+        self.current_selected_file = None
         self.file_list_widget.clear()
         self.update_file_count()
 
@@ -1679,6 +1759,86 @@ class FarmUI(QMainWindow):
                 self.jobs_table.setItem(i, 4, QTableWidgetItem(job.created_by))
             except:
                 pass
+
+    def on_job_double_clicked(self, row, column):
+        """작업 목록에서 더블클릭 시 프레임 범위 수정"""
+        job_id_item = self.jobs_table.item(row, 0)
+        if not job_id_item:
+            return
+
+        job_id = job_id_item.text()
+        job_info = self.farm_manager.load_job(job_id)
+        if not job_info:
+            QMessageBox.warning(self, "오류", f"작업 정보를 찾을 수 없습니다: {job_id}")
+            return
+
+        # 현재 프레임 범위
+        current_start = job_info.get("start_frame", 0)
+        current_end = job_info.get("end_frame", 29)
+        total_frames = job_info.get("total_frames", current_end + 1)
+
+        # 다이얼로그로 프레임 범위 수정
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"프레임 범위 수정: {job_id}")
+        dialog.setMinimumWidth(300)
+
+        layout = QVBoxLayout(dialog)
+
+        # 정보 라벨
+        info_label = QLabel(f"클립: {Path(job_info.get('clip_path', '')).name}\n총 프레임: {total_frames}")
+        layout.addWidget(info_label)
+
+        # 프레임 범위 입력
+        frame_layout = QHBoxLayout()
+        start_spin = QSpinBox()
+        start_spin.setRange(0, max(100000, total_frames))
+        start_spin.setValue(current_start)
+
+        end_spin = QSpinBox()
+        end_spin.setRange(0, max(100000, total_frames))
+        end_spin.setValue(current_end)
+
+        frame_layout.addWidget(QLabel("시작:"))
+        frame_layout.addWidget(start_spin)
+        frame_layout.addWidget(QLabel("~"))
+        frame_layout.addWidget(QLabel("끝:"))
+        frame_layout.addWidget(end_spin)
+        layout.addLayout(frame_layout)
+
+        # 버튼
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("확인")
+        cancel_btn = QPushButton("취소")
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() == QDialog.Accepted:
+            new_start = start_spin.value()
+            new_end = end_spin.value()
+
+            if new_start > new_end:
+                QMessageBox.warning(self, "오류", "시작 프레임이 끝 프레임보다 클 수 없습니다.")
+                return
+
+            # 작업 정보 업데이트
+            job_info["start_frame"] = new_start
+            job_info["end_frame"] = new_end
+
+            # 작업 파일에 저장
+            job_file = Path(self.farm_manager.jobs_path) / f"{job_id}.json"
+            try:
+                with open(job_file, 'w', encoding='utf-8') as f:
+                    json.dump(job_info, f, indent=2, ensure_ascii=False)
+
+                # 테이블 업데이트
+                self.jobs_table.setItem(row, 3, QTableWidgetItem(f"{new_start}-{new_end}"))
+                self.add_log(f"📝 작업 '{job_id}' 프레임 범위 수정: {new_start}-{new_end}")
+            except Exception as e:
+                QMessageBox.warning(self, "오류", f"작업 저장 실패: {e}")
 
     def show_job_context_menu(self, position):
         """작업 목록 컨텍스트 메뉴 표시"""

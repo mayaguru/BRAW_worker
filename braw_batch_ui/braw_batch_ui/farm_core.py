@@ -254,6 +254,17 @@ class FarmManager:
         with open(job_file, 'w', encoding='utf-8') as f:
             json.dump(job.to_dict(), f, indent=2)
 
+    def load_job(self, job_id: str) -> Optional[Dict]:
+        """작업 정보 로드 (dict로 반환)"""
+        job_file = self.config.jobs_dir / f"{job_id}.json"
+        if job_file.exists():
+            try:
+                with open(job_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return None
+
     def get_pending_jobs(self) -> List[RenderJob]:
         """대기중인 작업 목록"""
         jobs = []
@@ -311,13 +322,24 @@ class FarmManager:
             pass
 
     def mark_completed(self, job_id: str, frame_idx: int, eye: str):
-        """프레임 완료 표시"""
+        """프레임 완료 표시 - 항상 클레임 해제"""
         completed_file = self.config.completed_dir / f"{job_id}_{frame_idx:06d}_{eye}.done"
         with open(completed_file, 'w') as f:
             f.write(self.worker.worker_id)
 
         # 클레임 해제
         self.release_claim(job_id, frame_idx, eye)
+
+    def mark_completed_if_file_exists(self, job: 'RenderJob', frame_idx: int, eye: str) -> bool:
+        """파일이 실제로 존재할 때만 완료 표시, 아니면 False 반환"""
+        output_file = self.get_output_file_path(job, frame_idx, eye)
+        if output_file.exists():
+            self.mark_completed(job.job_id, frame_idx, eye)
+            return True
+        else:
+            # 파일 없음 - 클레임만 해제 (재시도 가능하도록)
+            self.release_claim(job.job_id, frame_idx, eye)
+            return False
 
     def is_frame_completed(self, job_id: str, frame_idx: int, eye: str) -> bool:
         """프레임 완료 여부 확인"""
@@ -369,12 +391,10 @@ class FarmManager:
             pass
 
     def is_job_complete(self, job: 'RenderJob') -> bool:
-        """작업의 모든 프레임이 완료됐는지 확인 (.done + 실제 파일 기준)"""
-        for frame_idx in range(job.start_frame, job.end_frame + 1):
-            for eye in job.eyes:
-                if not self.is_frame_really_complete(job, frame_idx, eye):
-                    return False
-        return True
+        """작업의 모든 프레임이 완료됐는지 확인 (.done 파일 기준 - 빠른 체크)"""
+        expected_count = (job.end_frame - job.start_frame + 1) * len(job.eyes)
+        completed_count = len(list(self.config.completed_dir.glob(f"{job.job_id}_*.done")))
+        return completed_count >= expected_count
 
     def mark_job_verified(self, job_id: str, avg_size: float, total_files: int):
         """작업 검증 완료 표시"""
@@ -577,11 +597,11 @@ class FarmManager:
         return True
 
     def find_next_frame(self, job: RenderJob) -> Optional[Tuple[int, str]]:
-        """다음 처리할 프레임 찾기"""
+        """다음 처리할 프레임 찾기 (최적화: .done 파일만 확인)"""
         for frame_idx in range(job.start_frame, job.end_frame + 1):
             for eye in job.eyes:
-                # 실제로 완료되지 않은 프레임 찾기 (.done + 출력파일 모두 확인)
-                if not self.is_frame_really_complete(job, frame_idx, eye):
+                # 빠른 체크: .done 파일만 확인 (네트워크 부하 감소)
+                if not self.is_frame_completed(job.job_id, frame_idx, eye):
                     if self.claim_frame(job.job_id, frame_idx, eye):
                         return (frame_idx, eye)
         return None
