@@ -357,23 +357,36 @@ class SettingsDialog(QDialog):
 
 
 class StatusUpdateThread(QThread):
-    """상태 업데이트 스레드 (UI 블로킹 방지)"""
+    """상태 업데이트 스레드 (UI 블로킹 방지, 실시간 동기화)"""
     workers_signal = Signal(list)
-    jobs_signal = Signal(list)
+    jobs_signal = Signal(list)  # List of (RenderJob, status, completed, total)
 
     def __init__(self, farm_manager):
         super().__init__()
         self.farm_manager = farm_manager
         self.is_running = False
+        self._last_job_ids = set()  # 마지막으로 확인한 작업 ID 캐시
 
     def run(self):
         self.is_running = True
         while self.is_running:
             try:
                 workers = self.farm_manager.get_active_workers()
-                jobs = self.farm_manager.get_pending_jobs()
+                # 실시간 동기화: 모든 작업 + 상태 정보
+                jobs_with_status = self.farm_manager.get_all_jobs_with_status()
+
+                # 현재 작업 ID 세트
+                current_job_ids = {job.job_id for job, _, _, _ in jobs_with_status}
+
+                # 삭제된 작업 감지 (로그용)
+                deleted_jobs = self._last_job_ids - current_job_ids
+                if deleted_jobs:
+                    pass  # 삭제된 작업은 자동으로 목록에서 제거됨
+
+                self._last_job_ids = current_job_ids
+
                 self.workers_signal.emit(workers)
-                self.jobs_signal.emit(jobs)
+                self.jobs_signal.emit(jobs_with_status)
             except (OSError, IOError):
                 pass
             time.sleep(1)
@@ -750,7 +763,8 @@ class FarmUI(QMainWindow):
     def init_ui(self):
         """UI 초기화"""
         self.setWindowTitle("BRAW Render Farm")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setGeometry(100, 100, 1400, 800)
+        self.setMinimumSize(1200, 700)
 
         # 다크 테마 스타일시트 적용
         self.setStyleSheet("""
@@ -943,50 +957,56 @@ class FarmUI(QMainWindow):
         from PySide6.QtWidgets import QSplitter
         from PySide6.QtCore import Qt
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setStyleSheet("""
+        # 스플리터 공통 스타일
+        splitter_style = """
             QSplitter::handle {
                 background-color: #505050;
-                width: 4px;
             }
             QSplitter::handle:hover {
                 background-color: #0d7377;
             }
-        """)
+            QSplitter::handle:horizontal {
+                width: 4px;
+            }
+            QSplitter::handle:vertical {
+                height: 4px;
+            }
+        """
 
-        # 왼쪽 패널: 작업 제출 + 워커 제어
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setSpacing(15)  # 섹션 간 간격
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        left_layout.addWidget(self.create_submit_section())
-        left_layout.addWidget(self.create_worker_section())
-        left_layout.addStretch()  # 아래쪽 여백 추가
+        # 메인 가로 스플리터 (왼쪽/오른쪽 패널)
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.setStyleSheet(splitter_style)
 
-        # 오른쪽 패널: 모니터링 + 로그
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setSpacing(15)  # 섹션 간 간격
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.addWidget(self.create_monitor_section(), stretch=2)  # 모니터링 섹션 2 비율
-        right_layout.addWidget(self.create_log_section(), stretch=1)  # 로그 섹션 1 비율
+        # 왼쪽 패널: 작업 제출 + 워커 제어 (세로 스플리터)
+        left_splitter = QSplitter(Qt.Vertical)
+        left_splitter.setStyleSheet(splitter_style)
+        left_splitter.setContentsMargins(10, 10, 10, 10)
+        left_splitter.addWidget(self.create_submit_section())
+        left_splitter.addWidget(self.create_worker_section())
+        left_splitter.setSizes([450, 250])  # 작업 제출 : 워커 제어 비율
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setSizes([500, 900])  # 초기 크기 비율
+        # 오른쪽 패널: 모니터링 + 로그 (세로 스플리터)
+        right_splitter = QSplitter(Qt.Vertical)
+        right_splitter.setStyleSheet(splitter_style)
+        right_splitter.setContentsMargins(10, 10, 10, 10)
+        right_splitter.addWidget(self.create_monitor_section())
+        right_splitter.addWidget(self.create_log_section())
+        right_splitter.setSizes([500, 200])  # 모니터링 : 로그 비율
 
-        main_layout.addWidget(splitter)
+        main_splitter.addWidget(left_splitter)
+        main_splitter.addWidget(right_splitter)
+        main_splitter.setSizes([500, 900])  # 왼쪽 : 오른쪽 비율
+
+        main_layout.addWidget(main_splitter)
 
     def create_submit_section(self):
         """작업 제출 섹션"""
         widget = QGroupBox("📤 작업 제출")
-        widget.setMaximumHeight(600)  # 전체 섹션 최대 높이 제한 (2배)
         layout = QVBoxLayout(widget)
 
         # 파일 선택 영역 (드래그 앤 드롭 지원)
         file_area = QWidget()
         file_area.setAcceptDrops(True)
-        file_area.setMaximumHeight(380)  # 최대 높이 제한 (2배)
         file_area.dragEnterEvent = self.drag_enter_event
         file_area.dropEvent = self.drop_event
         file_area.setStyleSheet("""
@@ -1009,7 +1029,7 @@ class FarmUI(QMainWindow):
 
         # 선택된 파일 목록
         self.file_list_widget = QListWidget()
-        self.file_list_widget.setMaximumHeight(280)  # 2배 높이
+        self.file_list_widget.setMinimumHeight(100)  # 최소 높이만 설정
         self.file_list_widget.setSelectionMode(QListWidget.ExtendedSelection)  # Ctrl+클릭 다중 선택
         self.file_list_widget.setToolTip("선택된 BRAW 파일 목록\n클릭: 프레임 범위 표시\nCtrl+클릭: 다중 선택 후 프레임 일괄 적용\n더블클릭: 제거")
         self.file_list_widget.itemClicked.connect(self.on_file_selected)
@@ -1152,7 +1172,6 @@ class FarmUI(QMainWindow):
     def create_worker_section(self):
         """워커 제어 섹션"""
         widget = QGroupBox("⚙️ 워커 제어")
-        widget.setMaximumHeight(200)  # 전체 섹션 최대 높이 제한
         layout = QVBoxLayout(widget)
 
         # 워커 정보 - 컴팩트하게
@@ -1235,30 +1254,94 @@ class FarmUI(QMainWindow):
         return widget
 
     def create_monitor_section(self):
-        """모니터링 섹션"""
+        """모니터링 섹션 (내부 스플리터로 워커/작업 목록 분리)"""
+        from PySide6.QtWidgets import QSplitter
+
         widget = QGroupBox("📊 실시간 모니터링")
         layout = QVBoxLayout(widget)
 
-        # 활성 워커 목록
+        # 스플리터 스타일
+        splitter_style = """
+            QSplitter::handle {
+                background-color: #505050;
+            }
+            QSplitter::handle:hover {
+                background-color: #0d7377;
+            }
+            QSplitter::handle:vertical {
+                height: 4px;
+            }
+        """
+
+        # 내부 세로 스플리터 (워커 테이블 / 작업 목록)
+        monitor_splitter = QSplitter(Qt.Vertical)
+        monitor_splitter.setStyleSheet(splitter_style)
+
+        # === 활성 워커 섹션 ===
+        workers_widget = QWidget()
+        workers_layout = QVBoxLayout(workers_widget)
+        workers_layout.setContentsMargins(0, 0, 0, 0)
+
         self.workers_table = QTableWidget()
         self.workers_table.setColumnCount(8)
         self.workers_table.setHorizontalHeaderLabels(["워커 ID", "IP", "상태", "CPU", "작업 ID", "영상", "처리", "에러"])
         self.workers_table.verticalHeader().setVisible(False)
-        layout.addWidget(QLabel("👷 활성 워커"))
-        layout.addWidget(self.workers_table, stretch=1)  # 창 크기에 맞춰 늘어남
+        # 컬럼 너비 설정 (이미지 참고)
+        self.workers_table.setColumnWidth(0, 120)  # 워커 ID
+        self.workers_table.setColumnWidth(1, 90)   # IP
+        self.workers_table.setColumnWidth(2, 70)   # 상태
+        self.workers_table.setColumnWidth(3, 60)   # CPU
+        self.workers_table.setColumnWidth(4, 160)  # 작업 ID
+        self.workers_table.setColumnWidth(5, 180)  # 영상
+        self.workers_table.setColumnWidth(6, 70)   # 처리
+        self.workers_table.setColumnWidth(7, 50)   # 에러
+        self.workers_table.horizontalHeader().setStretchLastSection(True)
+        workers_layout.addWidget(QLabel("👷 활성 워커"))
+        workers_layout.addWidget(self.workers_table)
 
-        # 작업 목록
+        # === 작업 목록 섹션 ===
+        jobs_widget = QWidget()
+        jobs_layout = QVBoxLayout(jobs_widget)
+        jobs_layout.setContentsMargins(0, 0, 0, 0)
+
         self.jobs_table = QTableWidget()
         self.jobs_table.setColumnCount(5)
         self.jobs_table.setHorizontalHeaderLabels(["작업 ID", "파일", "범위", "진행률", "제출자"])
         self.jobs_table.verticalHeader().setVisible(False)
+        # 컬럼 너비 설정 (이미지 참고)
+        self.jobs_table.setColumnWidth(0, 180)  # 작업 ID
+        self.jobs_table.setColumnWidth(1, 200)  # 파일
+        self.jobs_table.setColumnWidth(2, 80)   # 범위
+        self.jobs_table.setColumnWidth(3, 140)  # 진행률
+        self.jobs_table.setColumnWidth(4, 100)  # 제출자
+        self.jobs_table.horizontalHeader().setStretchLastSection(True)
         self.jobs_table.setSelectionBehavior(QTableWidget.SelectRows)  # 행 단위 선택
         self.jobs_table.setSelectionMode(QTableWidget.ExtendedSelection)  # 다중 선택 허용
         self.jobs_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.jobs_table.customContextMenuRequested.connect(self.show_job_context_menu)
         self.jobs_table.cellDoubleClicked.connect(self.on_job_double_clicked)  # 더블클릭으로 프레임 수정
-        layout.addWidget(QLabel("📋 작업 목록 (더블클릭: 프레임 범위 수정)"))
-        layout.addWidget(self.jobs_table, stretch=1)  # 창 크기에 맞춰 늘어남
+
+        # 작업 목록 헤더 (제목 + 완료 작업 표시 옵션)
+        jobs_header_layout = QHBoxLayout()
+        jobs_header_layout.addWidget(QLabel("📋 작업 목록 (더블클릭: 프레임 범위 수정)"))
+        jobs_header_layout.addStretch()
+
+        # 완료된 작업 표시 체크박스
+        self.show_completed_jobs = True
+        self.show_completed_checkbox = QCheckBox("완료된 작업 표시")
+        self.show_completed_checkbox.setChecked(True)
+        self.show_completed_checkbox.stateChanged.connect(self.on_show_completed_changed)
+        jobs_header_layout.addWidget(self.show_completed_checkbox)
+
+        jobs_layout.addLayout(jobs_header_layout)
+        jobs_layout.addWidget(self.jobs_table)
+
+        # 스플리터에 추가
+        monitor_splitter.addWidget(workers_widget)
+        monitor_splitter.addWidget(jobs_widget)
+        monitor_splitter.setSizes([200, 250])  # 워커 : 작업목록 비율
+
+        layout.addWidget(monitor_splitter)
 
         return widget
 
@@ -1744,22 +1827,30 @@ class FarmUI(QMainWindow):
                 error_item.setForeground(QColor(76, 175, 80))  # 녹색
             self.workers_table.setItem(i, 7, error_item)
 
-    def update_jobs_table(self, jobs):
-        """작업 목록 테이블 업데이트"""
-        self.jobs_table.setRowCount(len(jobs))
-        for i, job in enumerate(jobs):
+    def update_jobs_table(self, jobs_with_status):
+        """작업 목록 테이블 업데이트 (실시간 동기화)
+
+        Args:
+            jobs_with_status: List of (RenderJob, status, completed, total) tuples
+        """
+        # 완료된 작업 표시 여부 확인
+        show_completed = getattr(self, 'show_completed_jobs', True)
+
+        # 필터링
+        if not show_completed:
+            jobs_with_status = [item for item in jobs_with_status if item[1] != 'completed']
+
+        self.jobs_table.setRowCount(len(jobs_with_status))
+        for i, (job, status, completed, total) in enumerate(jobs_with_status):
             try:
-                progress = self.farm_manager.get_job_progress(job.job_id)
-                total = job.get_total_tasks()
-                completed = progress['completed']
                 progress_percent = (completed / total * 100) if total > 0 else 0
 
-                # 작업 ID - 진행 상태에 따라 색상 변경
+                # 작업 ID - 상태에 따라 색상 변경 (강화된 색상 구분)
                 job_id_item = QTableWidgetItem(job.job_id)
-                if completed == 0:
+                if status == 'pending':
                     # 대기중 - 파란색
                     job_id_item.setForeground(QColor(33, 150, 243))
-                elif completed < total:
+                elif status == 'in_progress':
                     # 진행중 - 주황색
                     job_id_item.setForeground(QColor(255, 152, 0))
                 else:
@@ -1773,12 +1864,18 @@ class FarmUI(QMainWindow):
                 # 범위
                 self.jobs_table.setItem(i, 2, QTableWidgetItem(f"{job.start_frame}-{job.end_frame}"))
 
-                # 진행률 - 퍼센트와 프레임 수
-                progress_text = f"{progress_percent:.1f}% ({completed}/{total})"
+                # 진행률 - 퍼센트와 프레임 수 + 상태 표시
+                if status == 'completed':
+                    progress_text = f"✓ 완료 ({completed}/{total})"
+                elif status == 'in_progress':
+                    progress_text = f"⏳ {progress_percent:.1f}% ({completed}/{total})"
+                else:
+                    progress_text = f"⏸ 대기중 ({completed}/{total})"
+
                 progress_item = QTableWidgetItem(progress_text)
-                if completed == 0:
+                if status == 'pending':
                     progress_item.setForeground(QColor(158, 158, 158))  # 회색
-                elif completed < total:
+                elif status == 'in_progress':
                     progress_item.setForeground(QColor(255, 152, 0))  # 주황색
                 else:
                     progress_item.setForeground(QColor(76, 175, 80))  # 녹색
@@ -1788,6 +1885,11 @@ class FarmUI(QMainWindow):
                 self.jobs_table.setItem(i, 4, QTableWidgetItem(job.created_by))
             except (AttributeError, TypeError, OSError):
                 pass
+
+    def on_show_completed_changed(self, state):
+        """완료된 작업 표시 체크박스 상태 변경"""
+        self.show_completed_jobs = (state == Qt.Checked)
+        # 다음 업데이트에서 자동 반영됨 (StatusUpdateThread가 1초마다 갱신)
 
     def on_job_double_clicked(self, row, column):
         """작업 목록에서 더블클릭 시 프레임 범위 수정"""

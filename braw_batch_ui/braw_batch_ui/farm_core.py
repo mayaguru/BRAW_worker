@@ -399,6 +399,40 @@ class FarmManager:
                     pass  # 손상된 데이터 무시
         return jobs
 
+    def get_all_jobs_with_status(self) -> List[Tuple[RenderJob, str, int, int]]:
+        """모든 작업 목록 + 상태 정보 (실시간 동기화용)
+
+        Returns:
+            List of (RenderJob, status, completed, total) tuples
+            status: 'pending', 'in_progress', 'completed'
+        """
+        result = []
+        for job_file in self.config.jobs_dir.glob("*.json"):
+            data = safe_json_read(job_file)
+            if data:
+                try:
+                    job = RenderJob.from_dict(data)
+                    progress = self.get_job_progress(job.job_id)
+                    total = job.get_total_tasks()
+                    completed = progress.get('completed', 0)
+
+                    # 상태 결정
+                    if completed >= total and total > 0:
+                        status = 'completed'
+                    elif completed > 0:
+                        status = 'in_progress'
+                    else:
+                        status = 'pending'
+
+                    result.append((job, status, completed, total))
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+        # 정렬: in_progress > pending > completed, 그 다음 job_id 기준
+        status_order = {'in_progress': 0, 'pending': 1, 'completed': 2}
+        result.sort(key=lambda x: (status_order.get(x[1], 3), x[0].job_id))
+        return result
+
     def claim_frame(self, job_id: str, frame_idx: int, eye: str) -> bool:
         """프레임 클레임 시도 (atomic, 레이스 컨디션 방지 - 15대 동시 운영 최적화)"""
         claim = FrameClaim(job_id, frame_idx, eye, self.worker.worker_id)
