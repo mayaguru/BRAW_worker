@@ -1858,7 +1858,7 @@ class FarmUI(QMainWindow):
             job_info["end_frame"] = new_end
 
             # 작업 파일에 저장
-            job_file = Path(self.farm_manager.jobs_path) / f"{job_id}.json"
+            job_file = self.farm_manager.config.jobs_dir / f"{job_id}.json"
             try:
                 with open(job_file, 'w', encoding='utf-8') as f:
                     json.dump(job_info, f, indent=2, ensure_ascii=False)
@@ -1993,7 +1993,7 @@ class FarmUI(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             for job_id in job_ids:
-                self.farm_manager.mark_job_complete(job_id)
+                self.farm_manager.mark_job_completed(job_id)
             QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 완료로 표시되었습니다.")
 
     def delete_jobs(self, job_ids: list):

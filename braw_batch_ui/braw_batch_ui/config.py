@@ -15,9 +15,11 @@ from typing import Optional
 # 타임아웃 (초)
 HEARTBEAT_INTERVAL_SEC = 30  # 하트비트 간격
 WORKER_TIMEOUT_SEC = 120  # 워커 활성 판정 타임아웃 (2분)
-CLAIM_TIMEOUT_SEC = 90  # 프레임 클레임 타임아웃
 SUBPROCESS_TIMEOUT_DEFAULT_SEC = 60  # 기본 서브프로세스 타임아웃
 SUBPROCESS_TIMEOUT_ACES_SEC = 90  # ACES 색공간 변환 시 타임아웃
+# 클레임 타임아웃은 반드시 서브프로세스 타임아웃보다 커야 함 (15대 동시 운영 고려)
+# CLAIM_TIMEOUT_SEC > SUBPROCESS_TIMEOUT_ACES_SEC + 여유시간(30초)
+CLAIM_TIMEOUT_SEC = 120  # 프레임 클레임 타임아웃 (90초 → 120초)
 CLIP_INFO_TIMEOUT_SEC = 10  # 클립 정보 조회 타임아웃
 
 # 로그 관련
@@ -25,6 +27,26 @@ LOG_MAX_LINES = 5000  # 로그 위젯 최대 라인 수
 
 # 파일 검증
 MIN_FILE_SIZE_RATIO = 0.7  # 평균 대비 최소 파일 크기 비율 (70%)
+
+# ===== 15대 동시 운영 최적화 설정 =====
+
+# 파일 I/O 재시도 설정
+FILE_IO_MAX_RETRIES = 3  # 파일 읽기/쓰기 최대 재시도 횟수
+FILE_IO_RETRY_DELAY_BASE = 0.1  # 재시도 기본 딜레이 (초)
+FILE_IO_RETRY_DELAY_MAX = 1.0  # 재시도 최대 딜레이 (초)
+
+# 클레임 충돌 방지 설정
+CLAIM_RANDOM_DELAY_MIN = 0.01  # 클레임 시 최소 랜덤 딜레이 (초)
+CLAIM_RANDOM_DELAY_MAX = 0.05  # 클레임 시 최대 랜덤 딜레이 (초)
+CLAIM_VERIFY_DELAY = 0.02  # 클레임 검증 딜레이 (초)
+
+# 작업 분산 설정 (15대가 같은 프레임으로 몰리지 않도록)
+FRAME_SEARCH_RANDOM_START = True  # 프레임 검색 시 랜덤 시작점 사용
+FRAME_SEARCH_BATCH_SIZE = 50  # 한 번에 검색할 프레임 범위
+
+# 네트워크 파일시스템 안정성
+NFS_WRITE_SYNC_DELAY = 0.01  # 쓰기 후 동기화 대기 (초)
+NFS_READ_RETRY_ON_EMPTY = True  # 빈 파일 읽기 시 재시도
 
 
 class FarmSettings:

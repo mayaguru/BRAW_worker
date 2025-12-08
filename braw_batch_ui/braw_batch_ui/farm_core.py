@@ -5,6 +5,7 @@ BRAW Render Farm Core
 """
 
 import json
+import random
 import socket
 import time
 from pathlib import Path
@@ -19,7 +20,98 @@ from config import (
     WORKER_TIMEOUT_SEC,
     CLAIM_TIMEOUT_SEC,
     MIN_FILE_SIZE_RATIO,
+    FILE_IO_MAX_RETRIES,
+    FILE_IO_RETRY_DELAY_BASE,
+    FILE_IO_RETRY_DELAY_MAX,
+    CLAIM_RANDOM_DELAY_MIN,
+    CLAIM_RANDOM_DELAY_MAX,
+    CLAIM_VERIFY_DELAY,
+    FRAME_SEARCH_RANDOM_START,
+    FRAME_SEARCH_BATCH_SIZE,
+    NFS_WRITE_SYNC_DELAY,
+    NFS_READ_RETRY_ON_EMPTY,
 )
+
+
+# ===== 15대 동시 운영을 위한 유틸리티 함수 =====
+
+def safe_json_read(file_path: Path, default=None) -> Optional[Dict]:
+    """안전한 JSON 읽기 (재시도 + 네트워크 파일시스템 대응)"""
+    for attempt in range(FILE_IO_MAX_RETRIES):
+        try:
+            if not file_path.exists():
+                return default
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # 빈 파일 처리 (네트워크 지연으로 인한 부분 쓰기)
+            if not content.strip():
+                if NFS_READ_RETRY_ON_EMPTY and attempt < FILE_IO_MAX_RETRIES - 1:
+                    delay = min(FILE_IO_RETRY_DELAY_BASE * (2 ** attempt), FILE_IO_RETRY_DELAY_MAX)
+                    time.sleep(delay)
+                    continue
+                return default
+
+            return json.loads(content)
+
+        except json.JSONDecodeError:
+            # JSON 손상 - 재시도
+            if attempt < FILE_IO_MAX_RETRIES - 1:
+                delay = min(FILE_IO_RETRY_DELAY_BASE * (2 ** attempt), FILE_IO_RETRY_DELAY_MAX)
+                time.sleep(delay)
+                continue
+            return default
+
+        except (OSError, IOError) as e:
+            # 파일 접근 오류 - 재시도
+            if attempt < FILE_IO_MAX_RETRIES - 1:
+                delay = min(FILE_IO_RETRY_DELAY_BASE * (2 ** attempt), FILE_IO_RETRY_DELAY_MAX)
+                time.sleep(delay)
+                continue
+            return default
+
+    return default
+
+
+def safe_json_write(file_path: Path, data: Dict, use_temp: bool = True) -> bool:
+    """안전한 JSON 쓰기 (원자적 교체 + 재시도)"""
+    for attempt in range(FILE_IO_MAX_RETRIES):
+        try:
+            if use_temp:
+                # 임시 파일로 쓰고 원자적 교체
+                temp_file = file_path.with_suffix(f'.{socket.gethostname()}.tmp')
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+                # 네트워크 파일시스템 동기화 대기
+                time.sleep(NFS_WRITE_SYNC_DELAY)
+
+                temp_file.replace(file_path)
+            else:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+                time.sleep(NFS_WRITE_SYNC_DELAY)
+
+            return True
+
+        except (OSError, IOError) as e:
+            if attempt < FILE_IO_MAX_RETRIES - 1:
+                delay = min(FILE_IO_RETRY_DELAY_BASE * (2 ** attempt), FILE_IO_RETRY_DELAY_MAX)
+                time.sleep(delay)
+                continue
+
+            # 임시 파일 정리
+            if use_temp:
+                temp_file = file_path.with_suffix(f'.{socket.gethostname()}.tmp')
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except:
+                    pass
+            return False
+
+    return False
 
 
 class FarmConfig:
@@ -221,20 +313,19 @@ class FarmManager:
             json.dump(self.worker.to_dict(), f, indent=2)
 
     def update_worker(self):
-        """워커 상태 업데이트 (스레드 안전)"""
+        """워커 상태 업데이트 (스레드 안전, 15대 동시 운영 최적화)"""
+        # CPU 사용률을 락 외부에서 측정 (블로킹 호출이므로 데드락 방지)
+        try:
+            cpu_usage = psutil.cpu_percent(interval=0.1)
+        except Exception:
+            cpu_usage = 0.0
+
         with self.worker_lock:
             self.worker.last_heartbeat = datetime.now()
-            # CPU 사용률 업데이트
-            try:
-                self.worker.cpu_usage = psutil.cpu_percent(interval=0.1)
-            except Exception:
-                self.worker.cpu_usage = 0.0
+            self.worker.cpu_usage = cpu_usage
             worker_file = self.config.workers_dir / f"{self.worker.worker_id}.json"
-            try:
-                with open(worker_file, 'w', encoding='utf-8') as f:
-                    json.dump(self.worker.to_dict(), f, indent=2)
-            except (OSError, IOError):
-                pass  # 네트워크 오류 시 무시
+            # safe_json_write로 안정적인 파일 쓰기
+            safe_json_write(worker_file, self.worker.to_dict(), use_temp=True)
 
     def increment_frames_completed(self):
         """프레임 완료 카운트 증가 (스레드 안전)"""
@@ -271,51 +362,45 @@ class FarmManager:
         self.heartbeat_thread.start()
 
     def get_active_workers(self) -> List[WorkerInfo]:
-        """활성 워커 목록 (최근 2분 이내)"""
+        """활성 워커 목록 (최근 2분 이내, 15대 동시 운영 최적화)"""
         workers = []
         for worker_file in self.config.workers_dir.glob("*.json"):
-            try:
-                with open(worker_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+            # safe_json_read로 안정적인 파일 읽기
+            data = safe_json_read(worker_file)
+            if data:
+                try:
                     worker = WorkerInfo.from_dict(data)
                     elapsed = (datetime.now() - worker.last_heartbeat).total_seconds()
                     if elapsed < WORKER_TIMEOUT_SEC:
                         workers.append(worker)
-            except (json.JSONDecodeError, KeyError, OSError, IOError):
-                pass
+                except (KeyError, TypeError, ValueError):
+                    pass  # 손상된 데이터 무시
         return workers
 
     def submit_job(self, job: RenderJob):
-        """작업 제출"""
+        """작업 제출 (15대 동시 운영 최적화)"""
         job_file = self.config.jobs_dir / f"{job.job_id}.json"
-        with open(job_file, 'w', encoding='utf-8') as f:
-            json.dump(job.to_dict(), f, indent=2)
+        safe_json_write(job_file, job.to_dict(), use_temp=True)
 
     def load_job(self, job_id: str) -> Optional[Dict]:
-        """작업 정보 로드 (dict로 반환)"""
+        """작업 정보 로드 (dict로 반환, 15대 동시 운영 최적화)"""
         job_file = self.config.jobs_dir / f"{job_id}.json"
-        if job_file.exists():
-            try:
-                with open(job_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError, IOError):
-                pass
-        return None
+        return safe_json_read(job_file)
 
     def get_pending_jobs(self) -> List[RenderJob]:
-        """대기중인 작업 목록"""
+        """대기중인 작업 목록 (15대 동시 운영 최적화)"""
         jobs = []
         for job_file in self.config.jobs_dir.glob("*.json"):
-            try:
-                with open(job_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+            data = safe_json_read(job_file)
+            if data:
+                try:
                     jobs.append(RenderJob.from_dict(data))
-            except (json.JSONDecodeError, KeyError, OSError, IOError):
-                pass
+                except (KeyError, TypeError, ValueError):
+                    pass  # 손상된 데이터 무시
         return jobs
 
     def claim_frame(self, job_id: str, frame_idx: int, eye: str) -> bool:
-        """프레임 클레임 시도 (atomic, 레이스 컨디션 방지)"""
+        """프레임 클레임 시도 (atomic, 레이스 컨디션 방지 - 15대 동시 운영 최적화)"""
         claim = FrameClaim(job_id, frame_idx, eye, self.worker.worker_id)
         claim_file = self.config.claims_dir / f"{job_id}_{frame_idx:06d}_{eye}.json"
         temp_file = self.config.claims_dir / f"{job_id}_{frame_idx:06d}_{eye}.{self.worker.worker_id}.tmp"
@@ -324,39 +409,55 @@ class FarmManager:
         if self.is_frame_completed(job_id, frame_idx, eye):
             return False
 
-        # 기존 클레임 확인
+        # 기존 클레임 확인 (safe_json_read 사용)
         if claim_file.exists():
-            try:
-                with open(claim_file, 'r', encoding='utf-8') as f:
-                    existing = FrameClaim.from_dict(json.load(f))
+            existing_data = safe_json_read(claim_file)
+            if existing_data:
+                try:
+                    existing = FrameClaim.from_dict(existing_data)
                     # 타임아웃되지 않았으면 실패
                     if not existing.is_expired():
                         return False
-                    # 만료된 claim - 덮어쓰기로 원자적 교체 시도
-                    # 임시 파일 생성 후 rename (원자적)
-                    try:
-                        with open(temp_file, 'w', encoding='utf-8') as tf:
-                            json.dump(claim.to_dict(), tf, indent=2)
-                        temp_file.replace(claim_file)  # 원자적 교체
-                        return True
-                    except (OSError, IOError):
-                        temp_file.unlink(missing_ok=True)
-                        return False
-            except (json.JSONDecodeError, KeyError, OSError):
-                # 손상된 클레임 파일 - 같은 방식으로 교체 시도
+                except (KeyError, TypeError):
+                    pass  # 손상된 데이터 - 아래에서 덮어쓰기 시도
+
+            # 만료된 claim 또는 손상된 파일 - 덮어쓰기로 원자적 교체 시도
+            # 15대 동시 운영 시 충돌 방지를 위한 랜덤 지연
+            time.sleep(random.uniform(CLAIM_RANDOM_DELAY_MIN, CLAIM_RANDOM_DELAY_MAX))
+
+            # 임시 파일 생성 후 rename (원자적)
+            try:
+                with open(temp_file, 'w', encoding='utf-8') as tf:
+                    json.dump(claim.to_dict(), tf, indent=2)
+                time.sleep(NFS_WRITE_SYNC_DELAY)
+                temp_file.replace(claim_file)  # 원자적 교체
+
+                # 클레임 성공 후 검증 (다른 워커가 덮어쓰지 않았는지)
+                time.sleep(CLAIM_VERIFY_DELAY)
+                verify_data = safe_json_read(claim_file)
+                if not verify_data or verify_data.get('worker_id') != self.worker.worker_id:
+                    return False  # 다른 워커가 덮어씀
+                return True
+            except (OSError, IOError):
                 try:
-                    with open(temp_file, 'w', encoding='utf-8') as tf:
-                        json.dump(claim.to_dict(), tf, indent=2)
-                    temp_file.replace(claim_file)
-                    return True
-                except (OSError, IOError):
                     temp_file.unlink(missing_ok=True)
-                    return False
+                except:
+                    pass
+                return False
 
         # 새 클레임 시도 (x 모드로 atomic)
         try:
             with open(claim_file, 'x', encoding='utf-8') as f:
                 json.dump(claim.to_dict(), f, indent=2)
+
+            # 네트워크 파일시스템 동기화 대기
+            time.sleep(NFS_WRITE_SYNC_DELAY)
+
+            # 클레임 성공 후 검증 (15대 동시 접근 시 네트워크 파일시스템 지연 대응)
+            time.sleep(CLAIM_VERIFY_DELAY)
+            verify_data = safe_json_read(claim_file)
+            if not verify_data or verify_data.get('worker_id') != self.worker.worker_id:
+                return False  # 다른 워커가 덮어씀
             return True
         except FileExistsError:
             # 다른 워커가 먼저 클레임
@@ -650,8 +751,18 @@ class FarmManager:
         return True
 
     def find_next_frame(self, job: RenderJob) -> Optional[Tuple[int, str]]:
-        """다음 처리할 프레임 찾기 (최적화: .done 파일만 확인)"""
-        for frame_idx in range(job.start_frame, job.end_frame + 1):
+        """다음 처리할 프레임 찾기 (15대 동시 운영 최적화: 랜덤 시작점으로 분산)"""
+        total_frames = job.end_frame - job.start_frame + 1
+
+        if FRAME_SEARCH_RANDOM_START and total_frames > FRAME_SEARCH_BATCH_SIZE:
+            # 15대가 같은 프레임에 몰리지 않도록 랜덤 시작점 사용
+            random_offset = random.randint(0, total_frames - 1)
+        else:
+            random_offset = 0
+
+        # 랜덤 시작점부터 검색하고, 끝까지 가면 처음부터 다시
+        for i in range(total_frames):
+            frame_idx = job.start_frame + ((random_offset + i) % total_frames)
             for eye in job.eyes:
                 # 빠른 체크: .done 파일만 확인 (네트워크 부하 감소)
                 if not self.is_frame_completed(job.job_id, frame_idx, eye):
