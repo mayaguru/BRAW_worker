@@ -5,14 +5,34 @@ BRAW Render Farm Configuration
 """
 
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
 
+# ===== 상수 정의 =====
+
+# 타임아웃 (초)
+HEARTBEAT_INTERVAL_SEC = 30  # 하트비트 간격
+WORKER_TIMEOUT_SEC = 120  # 워커 활성 판정 타임아웃 (2분)
+CLAIM_TIMEOUT_SEC = 90  # 프레임 클레임 타임아웃
+SUBPROCESS_TIMEOUT_DEFAULT_SEC = 60  # 기본 서브프로세스 타임아웃
+SUBPROCESS_TIMEOUT_ACES_SEC = 90  # ACES 색공간 변환 시 타임아웃
+CLIP_INFO_TIMEOUT_SEC = 10  # 클립 정보 조회 타임아웃
+
+# 로그 관련
+LOG_MAX_LINES = 5000  # 로그 위젯 최대 라인 수
+
+# 파일 검증
+MIN_FILE_SIZE_RATIO = 0.7  # 평균 대비 최소 파일 크기 비율 (70%)
+
+
 class FarmSettings:
-    """렌더팜 설정"""
+    """렌더팜 설정 (스레드 안전)"""
 
     def __init__(self):
+        self._lock = threading.RLock()  # 재진입 가능 락
+
         # 기본 설정
         self.farm_root = "P:/00-GIGA/BRAW_CLI"  # 공용 렌더팜 저장소
         self.cli_path = "P:/00-GIGA/BRAW_CLI/build/bin/braw_cli.exe"  # CLI 실행 파일 경로
@@ -28,9 +48,6 @@ class FarmSettings:
         self.last_preset = ""  # 마지막 선택한 프리셋
 
         # 설정 파일 경로 (로컬 - 내 문서)
-        from pathlib import Path
-        import os
-
         # Windows: C:\Users\사용자명\Documents\BRAW Farm\config.json
         # 다른 OS: ~/Documents/BRAW Farm/config.json
         documents = Path.home() / "Documents"
@@ -40,49 +57,51 @@ class FarmSettings:
         self.load()
 
     def load(self):
-        """설정 파일 로드"""
-        if self.config_file.exists():
-            try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.farm_root = data.get("farm_root", self.farm_root)
-                    self.cli_path = data.get("cli_path", self.cli_path)
-                    self.parallel_workers = data.get("parallel_workers", self.parallel_workers)
-                    self.max_retries = data.get("max_retries", self.max_retries)
-                    self.last_output_folder = data.get("last_output_folder", self.last_output_folder)
-                    # OCIO 설정
-                    self.ocio_config_path = data.get("ocio_config_path", self.ocio_config_path)
-                    self.color_input_space = data.get("color_input_space", self.color_input_space)
-                    self.color_output_space = data.get("color_output_space", self.color_output_space)
-                    self.color_presets = data.get("color_presets", self.color_presets)
-                    self.last_preset = data.get("last_preset", self.last_preset)
-            except Exception as e:
-                print(f"설정 로드 실패: {e}")
+        """설정 파일 로드 (스레드 안전)"""
+        with self._lock:
+            if self.config_file.exists():
+                try:
+                    with open(self.config_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        self.farm_root = data.get("farm_root", self.farm_root)
+                        self.cli_path = data.get("cli_path", self.cli_path)
+                        self.parallel_workers = data.get("parallel_workers", self.parallel_workers)
+                        self.max_retries = data.get("max_retries", self.max_retries)
+                        self.last_output_folder = data.get("last_output_folder", self.last_output_folder)
+                        # OCIO 설정
+                        self.ocio_config_path = data.get("ocio_config_path", self.ocio_config_path)
+                        self.color_input_space = data.get("color_input_space", self.color_input_space)
+                        self.color_output_space = data.get("color_output_space", self.color_output_space)
+                        self.color_presets = data.get("color_presets", self.color_presets)
+                        self.last_preset = data.get("last_preset", self.last_preset)
+                except (json.JSONDecodeError, OSError) as e:
+                    print(f"설정 로드 실패: {e}")
 
     def save(self):
-        """설정 파일 저장"""
-        try:
-            # 설정 디렉토리 생성
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        """설정 파일 저장 (스레드 안전)"""
+        with self._lock:
+            try:
+                # 설정 디렉토리 생성
+                self.config_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # 설정 저장
-            data = {
-                "farm_root": self.farm_root,
-                "cli_path": self.cli_path,
-                "parallel_workers": self.parallel_workers,
-                "max_retries": self.max_retries,
-                "last_output_folder": self.last_output_folder,
-                "ocio_config_path": self.ocio_config_path,
-                "color_input_space": self.color_input_space,
-                "color_output_space": self.color_output_space,
-                "color_presets": self.color_presets,
-                "last_preset": self.last_preset
-            }
+                # 설정 저장
+                data = {
+                    "farm_root": self.farm_root,
+                    "cli_path": self.cli_path,
+                    "parallel_workers": self.parallel_workers,
+                    "max_retries": self.max_retries,
+                    "last_output_folder": self.last_output_folder,
+                    "ocio_config_path": self.ocio_config_path,
+                    "color_input_space": self.color_input_space,
+                    "color_output_space": self.color_output_space,
+                    "color_presets": self.color_presets,
+                    "last_preset": self.last_preset
+                }
 
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"설정 저장 실패: {e}")
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except (OSError, IOError) as e:
+                print(f"설정 저장 실패: {e}")
 
     def to_dict(self):
         """딕셔너리로 변환"""

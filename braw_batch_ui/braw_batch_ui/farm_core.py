@@ -13,7 +13,13 @@ from datetime import datetime
 import threading
 import psutil
 
-from config import settings
+from config import (
+    settings,
+    HEARTBEAT_INTERVAL_SEC,
+    WORKER_TIMEOUT_SEC,
+    CLAIM_TIMEOUT_SEC,
+    MIN_FILE_SIZE_RATIO,
+)
 
 
 class FarmConfig:
@@ -55,7 +61,7 @@ class WorkerInfo:
             ip = s.getsockname()[0]
             s.close()
             return ip
-        except:
+        except (OSError, socket.error):
             return "127.0.0.1"
 
     def to_dict(self):
@@ -173,8 +179,10 @@ class FrameClaim:
         claim.claimed_at = datetime.fromisoformat(data["claimed_at"])
         return claim
 
-    def is_expired(self, timeout_seconds=90):
-        """타임아웃 확인 (기본 90초 - CLI 실행 30초 + 여유)"""
+    def is_expired(self, timeout_seconds: int = None):
+        """타임아웃 확인 (기본 CLAIM_TIMEOUT_SEC - CLI 실행 30초 + 여유)"""
+        if timeout_seconds is None:
+            timeout_seconds = CLAIM_TIMEOUT_SEC
         elapsed = (datetime.now() - self.claimed_at).total_seconds()
         return elapsed > timeout_seconds
 
@@ -186,6 +194,7 @@ class FarmManager:
         # farm_root가 None이면 settings.farm_root 사용
         self.config = FarmConfig(farm_root)
         self.worker = WorkerInfo()
+        self.worker_lock = threading.Lock()  # 워커 상태 스레드 안전성
         self.heartbeat_thread = None
         self.is_running = False
         self.network_connected = True
@@ -212,23 +221,51 @@ class FarmManager:
             json.dump(self.worker.to_dict(), f, indent=2)
 
     def update_worker(self):
-        """워커 상태 업데이트"""
-        self.worker.last_heartbeat = datetime.now()
-        # CPU 사용률 업데이트
-        try:
-            self.worker.cpu_usage = psutil.cpu_percent(interval=0.1)
-        except:
-            self.worker.cpu_usage = 0.0
-        worker_file = self.config.workers_dir / f"{self.worker.worker_id}.json"
-        with open(worker_file, 'w', encoding='utf-8') as f:
-            json.dump(self.worker.to_dict(), f, indent=2)
+        """워커 상태 업데이트 (스레드 안전)"""
+        with self.worker_lock:
+            self.worker.last_heartbeat = datetime.now()
+            # CPU 사용률 업데이트
+            try:
+                self.worker.cpu_usage = psutil.cpu_percent(interval=0.1)
+            except Exception:
+                self.worker.cpu_usage = 0.0
+            worker_file = self.config.workers_dir / f"{self.worker.worker_id}.json"
+            try:
+                with open(worker_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.worker.to_dict(), f, indent=2)
+            except (OSError, IOError):
+                pass  # 네트워크 오류 시 무시
+
+    def increment_frames_completed(self):
+        """프레임 완료 카운트 증가 (스레드 안전)"""
+        with self.worker_lock:
+            self.worker.frames_completed += 1
+
+    def increment_current_processed(self):
+        """현재 처리 카운트 증가 (스레드 안전)"""
+        with self.worker_lock:
+            self.worker.current_processed += 1
+
+    def increment_total_errors(self):
+        """총 오류 카운트 증가 (스레드 안전)"""
+        with self.worker_lock:
+            self.worker.total_errors += 1
+
+    def set_worker_status(self, status: str, job_id: str = "", clip_name: str = "", total_frames: int = 0):
+        """워커 상태 설정 (스레드 안전)"""
+        with self.worker_lock:
+            self.worker.status = status
+            self.worker.current_job_id = job_id
+            self.worker.current_clip_name = clip_name
+            if total_frames > 0:
+                self.worker.current_total_frames = total_frames
 
     def start_heartbeat(self):
-        """하트비트 시작 (30초마다)"""
+        """하트비트 시작 (HEARTBEAT_INTERVAL_SEC초마다)"""
         def heartbeat_loop():
             while self.is_running:
                 self.update_worker()
-                time.sleep(30)
+                time.sleep(HEARTBEAT_INTERVAL_SEC)
 
         self.heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
@@ -242,9 +279,9 @@ class FarmManager:
                     data = json.load(f)
                     worker = WorkerInfo.from_dict(data)
                     elapsed = (datetime.now() - worker.last_heartbeat).total_seconds()
-                    if elapsed < 120:  # 2분 이내
+                    if elapsed < WORKER_TIMEOUT_SEC:
                         workers.append(worker)
-            except:
+            except (json.JSONDecodeError, KeyError, OSError, IOError):
                 pass
         return workers
 
@@ -261,7 +298,7 @@ class FarmManager:
             try:
                 with open(job_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except:
+            except (json.JSONDecodeError, OSError, IOError):
                 pass
         return None
 
@@ -273,14 +310,15 @@ class FarmManager:
                 with open(job_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     jobs.append(RenderJob.from_dict(data))
-            except:
+            except (json.JSONDecodeError, KeyError, OSError, IOError):
                 pass
         return jobs
 
     def claim_frame(self, job_id: str, frame_idx: int, eye: str) -> bool:
-        """프레임 클레임 시도 (atomic)"""
+        """프레임 클레임 시도 (atomic, 레이스 컨디션 방지)"""
         claim = FrameClaim(job_id, frame_idx, eye, self.worker.worker_id)
         claim_file = self.config.claims_dir / f"{job_id}_{frame_idx:06d}_{eye}.json"
+        temp_file = self.config.claims_dir / f"{job_id}_{frame_idx:06d}_{eye}.{self.worker.worker_id}.tmp"
 
         # 이미 완료된 프레임인지 확인
         if self.is_frame_completed(job_id, frame_idx, eye):
@@ -294,21 +332,36 @@ class FarmManager:
                     # 타임아웃되지 않았으면 실패
                     if not existing.is_expired():
                         return False
-                    # 만료된 claim 삭제
-                    claim_file.unlink(missing_ok=True)
-            except:
-                # 읽기 실패 시 삭제 시도
+                    # 만료된 claim - 덮어쓰기로 원자적 교체 시도
+                    # 임시 파일 생성 후 rename (원자적)
+                    try:
+                        with open(temp_file, 'w', encoding='utf-8') as tf:
+                            json.dump(claim.to_dict(), tf, indent=2)
+                        temp_file.replace(claim_file)  # 원자적 교체
+                        return True
+                    except (OSError, IOError):
+                        temp_file.unlink(missing_ok=True)
+                        return False
+            except (json.JSONDecodeError, KeyError, OSError):
+                # 손상된 클레임 파일 - 같은 방식으로 교체 시도
                 try:
-                    claim_file.unlink(missing_ok=True)
-                except:
-                    pass
+                    with open(temp_file, 'w', encoding='utf-8') as tf:
+                        json.dump(claim.to_dict(), tf, indent=2)
+                    temp_file.replace(claim_file)
+                    return True
+                except (OSError, IOError):
+                    temp_file.unlink(missing_ok=True)
+                    return False
 
-        # 클레임 시도 (x 모드로 atomic)
+        # 새 클레임 시도 (x 모드로 atomic)
         try:
             with open(claim_file, 'x', encoding='utf-8') as f:
                 json.dump(claim.to_dict(), f, indent=2)
             return True
         except FileExistsError:
+            # 다른 워커가 먼저 클레임
+            return False
+        except (OSError, IOError):
             return False
 
     def release_claim(self, job_id: str, frame_idx: int, eye: str):
@@ -387,7 +440,7 @@ class FarmManager:
         verifying_file = self.config.completed_dir / f"{job_id}.verifying"
         try:
             verifying_file.unlink(missing_ok=True)
-        except:
+        except (OSError, IOError):
             pass
 
     def is_job_complete(self, job: 'RenderJob') -> bool:
@@ -471,8 +524,8 @@ class FarmManager:
             # 평균 파일 크기 계산
             sizes = [f["size"] for f in file_info]
             avg_size = sum(sizes) / len(sizes)
-            # 평균의 70% 미만이면 손상으로 간주 (30% 이상 작으면)
-            min_acceptable_size = avg_size * 0.7
+            # 평균의 MIN_FILE_SIZE_RATIO 미만이면 손상으로 간주
+            min_acceptable_size = avg_size * MIN_FILE_SIZE_RATIO
 
             for f in file_info:
                 if f["size"] < min_acceptable_size:
@@ -529,7 +582,7 @@ class FarmManager:
             if problem.get("reason") == "too_small":
                 try:
                     problem["path"].unlink()
-                except:
+                except (OSError, IOError):
                     pass
 
             # .done 파일 삭제 (재처리 유도)
@@ -538,7 +591,7 @@ class FarmManager:
                 try:
                     done_file.unlink()
                     repaired_count += 1
-                except:
+                except (OSError, IOError):
                     pass
 
             # claim 파일도 삭제 (다시 클레임 가능하게)
@@ -546,7 +599,7 @@ class FarmManager:
             if claim_file.exists():
                 try:
                     claim_file.unlink()
-                except:
+                except (OSError, IOError):
                     pass
 
         return repaired_count
@@ -590,7 +643,7 @@ class FarmManager:
             done_file = self.config.completed_dir / f"{job.job_id}_{frame_idx:06d}_{eye}.done"
             try:
                 done_file.unlink(missing_ok=True)
-            except:
+            except (OSError, IOError):
                 pass
             return False
 
@@ -628,7 +681,7 @@ class FarmManager:
                 with open(job_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     return RenderJob.from_dict(data)
-        except:
+        except (json.JSONDecodeError, KeyError, OSError, IOError):
             pass
         return None
 
@@ -641,9 +694,9 @@ class FarmManager:
                         claim = FrameClaim.from_dict(json.load(f))
                         if claim.worker_id == self.worker.worker_id:
                             claim_file.unlink(missing_ok=True)
-                except:
+                except (json.JSONDecodeError, KeyError, OSError, IOError):
                     pass
-        except:
+        except (OSError, IOError):
             pass
 
     def delete_job(self, job_id: str):

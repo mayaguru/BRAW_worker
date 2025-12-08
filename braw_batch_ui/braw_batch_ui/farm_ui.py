@@ -22,7 +22,13 @@ from PySide6.QtCore import Qt, QTimer, Signal, QThread, QUrl
 from PySide6.QtGui import QFont, QColor, QAction, QDesktopServices
 
 from farm_core import FarmManager, RenderJob, WorkerInfo
-from config import settings
+from config import (
+    settings,
+    SUBPROCESS_TIMEOUT_DEFAULT_SEC,
+    SUBPROCESS_TIMEOUT_ACES_SEC,
+    CLIP_INFO_TIMEOUT_SEC,
+    LOG_MAX_LINES,
+)
 
 
 def parse_ocio_colorspaces(config_path: str) -> list:
@@ -368,7 +374,7 @@ class StatusUpdateThread(QThread):
                 jobs = self.farm_manager.get_pending_jobs()
                 self.workers_signal.emit(workers)
                 self.jobs_signal.emit(jobs)
-            except:
+            except (OSError, IOError):
                 pass
             time.sleep(1)
 
@@ -439,14 +445,18 @@ class WorkerThread(QThread):
                 # 만료된 클레임 정리
                 self.farm_manager.cleanup_expired_claims()
 
-                # 대기중인 작업 찾기
+                # 대기중인 작업 찾기 (완료되지 않은 것만)
                 jobs = self.farm_manager.get_pending_jobs()
 
-                if jobs:
-                    for job in jobs:
-                        if not self.is_running:
-                            break
-                        self.farm_manager.last_job_id = job.job_id  # 마지막 작업 ID 저장
+                # 완료되지 않은 작업만 필터링하고, 생성 시간순 정렬
+                incomplete_jobs = [j for j in jobs if not self.farm_manager.is_job_complete(j)]
+                incomplete_jobs.sort(key=lambda x: x.created_at)
+
+                if incomplete_jobs:
+                    # 첫 번째 미완료 작업만 처리 (한 파일 집중)
+                    job = incomplete_jobs[0]
+                    if self.is_running:
+                        self.farm_manager.last_job_id = job.job_id
                         self.process_job(job)
                 else:
                     time.sleep(5)  # 작업 없으면 5초 대기
@@ -531,13 +541,19 @@ class WorkerThread(QThread):
                     break
 
                 frame_idx, eye = futures[future]
-                success = future.result()
+
+                # 예외 처리 추가
+                try:
+                    success = future.result()
+                except Exception as e:
+                    self.log_signal.emit(f"  ⚠️ [{frame_idx}] {eye.upper()} 처리 중 예외: {str(e)}")
+                    success = False
 
                 if success:
                     # 파일 존재 확인 + 완료 표시 (원자적으로 처리)
                     if self.farm_manager.mark_completed_if_file_exists(job, frame_idx, eye):
-                        self.farm_manager.worker.frames_completed += 1
-                        self.farm_manager.worker.current_processed += 1
+                        self.farm_manager.increment_frames_completed()  # 스레드 안전
+                        self.farm_manager.increment_current_processed()  # 스레드 안전
                         self.current_job_stats["success"] += 1
                         self.total_success += 1
                         self.total_processed += 1
@@ -562,7 +578,7 @@ class WorkerThread(QThread):
                     else:
                         # 최종 실패
                         self.farm_manager.release_claim(job.job_id, frame_idx, eye)
-                        self.farm_manager.worker.total_errors += 1
+                        self.farm_manager.increment_total_errors()  # 스레드 안전
                         self.current_job_stats["failed"] += 1
                         self.total_failed += 1
                         self.total_processed += 1
@@ -680,18 +696,24 @@ class WorkerThread(QThread):
         print(f"[DEBUG] CMD: {' '.join(cmd)}")
 
         try:
+            # EXR + ACES 변환은 시간이 오래 걸릴 수 있음
+            timeout_sec = SUBPROCESS_TIMEOUT_ACES_SEC if job.format == "exr" and job.use_aces else SUBPROCESS_TIMEOUT_DEFAULT_SEC
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=30
+                timeout=timeout_sec
             )
 
             return result.returncode == 0 and output_file.exists()
 
+        except subprocess.TimeoutExpired:
+            print(f"[TIMEOUT] 프레임 처리 타임아웃: {frame_idx}")
+            return False
         except Exception as e:
+            print(f"[ERROR] 프레임 처리 오류: {e}")
             return False
 
 
@@ -958,13 +980,13 @@ class FarmUI(QMainWindow):
     def create_submit_section(self):
         """작업 제출 섹션"""
         widget = QGroupBox("📤 작업 제출")
-        widget.setMaximumHeight(450)  # 전체 섹션 최대 높이 제한
+        widget.setMaximumHeight(600)  # 전체 섹션 최대 높이 제한 (2배)
         layout = QVBoxLayout(widget)
 
         # 파일 선택 영역 (드래그 앤 드롭 지원)
         file_area = QWidget()
         file_area.setAcceptDrops(True)
-        file_area.setMaximumHeight(220)  # 최대 높이 제한
+        file_area.setMaximumHeight(380)  # 최대 높이 제한 (2배)
         file_area.dragEnterEvent = self.drag_enter_event
         file_area.dropEvent = self.drop_event
         file_area.setStyleSheet("""
@@ -987,7 +1009,7 @@ class FarmUI(QMainWindow):
 
         # 선택된 파일 목록
         self.file_list_widget = QListWidget()
-        self.file_list_widget.setMaximumHeight(120)
+        self.file_list_widget.setMaximumHeight(280)  # 2배 높이
         self.file_list_widget.setSelectionMode(QListWidget.ExtendedSelection)  # Ctrl+클릭 다중 선택
         self.file_list_widget.setToolTip("선택된 BRAW 파일 목록\n클릭: 프레임 범위 표시\nCtrl+클릭: 다중 선택 후 프레임 일괄 적용\n더블클릭: 제거")
         self.file_list_widget.itemClicked.connect(self.on_file_selected)
@@ -1398,14 +1420,14 @@ class FarmUI(QMainWindow):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=10
+                timeout=CLIP_INFO_TIMEOUT_SEC
             )
 
             if result.returncode == 0:
                 for line in result.stdout.splitlines():
                     if "FRAME_COUNT=" in line and not line.startswith("[DEBUG]"):
                         return int(line.split("=", 1)[1])
-        except:
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, ValueError):
             pass
         return 0
 
@@ -1431,7 +1453,7 @@ class FarmUI(QMainWindow):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=10
+                timeout=CLIP_INFO_TIMEOUT_SEC
             )
 
             if result.returncode != 0:
@@ -1640,8 +1662,15 @@ class FarmUI(QMainWindow):
             )
 
     def append_worker_log(self, text):
-        """워커 로그 추가"""
+        """워커 로그 추가 (메모리 누수 방지: 최대 LOG_MAX_LINES줄)"""
         self.worker_log.append(text)
+        # 로그 줄 수 제한 (메모리 누수 방지)
+        doc = self.worker_log.document()
+        if doc.blockCount() > LOG_MAX_LINES:
+            cursor = self.worker_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, doc.blockCount() - LOG_MAX_LINES)
+            cursor.removeSelectedText()
 
     def update_progress(self, completed, total):
         """진행률 업데이트"""
@@ -1757,7 +1786,7 @@ class FarmUI(QMainWindow):
 
                 # 제출자
                 self.jobs_table.setItem(i, 4, QTableWidgetItem(job.created_by))
-            except:
+            except (AttributeError, TypeError, OSError):
                 pass
 
     def on_job_double_clicked(self, row, column):
