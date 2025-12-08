@@ -100,8 +100,11 @@ std::optional<Arguments> parse_arguments(int argc, char** argv) {
             args.use_aces = true;
         } else if (arg == "--gamma") {
             args.apply_gamma = true;
+        } else if (arg.rfind("--input-cs=", 0) == 0) {
+            args.input_colorspace = arg.substr(11);
+        } else if (arg.rfind("--output-cs=", 0) == 0) {
+            args.output_colorspace = arg.substr(12);
         }
-        // --input-cs, --output-cs 옵션은 무시 (하드코딩된 값 사용)
     }
 
     return args;

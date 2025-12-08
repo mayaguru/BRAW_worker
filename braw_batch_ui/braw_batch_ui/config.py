@@ -21,7 +21,7 @@ class FarmSettings:
 
         # OCIO 설정
         self.ocio_config_path = ""  # OCIO config 파일 경로
-        self.color_input_space = "Linear BMD WideGamut Gen5"  # 입력 색공간
+        self.color_input_space = "BMDFilm WideGamut Gen5"  # 입력 색공간
         self.color_output_space = "ACEScg"  # 출력 색공간
         self.color_presets = {}  # 색공간 프리셋 저장 {"프리셋이름": {"input": "...", "output": "..."}}
 

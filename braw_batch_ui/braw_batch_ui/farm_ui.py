@@ -580,9 +580,10 @@ class WorkerThread(QThread):
         ]
 
         # 색공간 변환 플래그 추가 (EXR 출력일 때만)
-        # 색공간은 CLI에 하드코딩됨 (BMDFilm WideGamut Gen5 → ACEScg)
         if job.format == "exr" and job.use_aces:
             cmd.append("--aces")
+            cmd.append(f"--input-cs={job.color_input_space}")
+            cmd.append(f"--output-cs={job.color_output_space}")
 
         # 디버그: 실행 명령 출력
         print(f"[DEBUG] CMD: {' '.join(cmd)}")
@@ -976,9 +977,19 @@ class FarmUI(QMainWindow):
         self.separate_check.setChecked(True)  # 폴더분리 기본값을 True로 설정
         self.separate_check.setToolTip("L/R 이미지를 별도 폴더에 저장\n체크: L/, R/ 폴더로 분리\n해제: 한 폴더에 _L, _R 접미사로 저장")
 
-        self.aces_check = QCheckBox("ACEScg")
+        self.aces_check = QCheckBox("색변환")
         self.aces_check.setChecked(True)  # 색공간 변환 기본값 True
-        self.aces_check.setToolTip("OCIO 색공간 변환 적용\nBMDFilm WideGamut Gen5 → ACEScg")
+        self.aces_check.setToolTip("OCIO 색공간 변환 적용\n체크: 설정된 입력→출력 색공간 변환\n해제: 원본 색공간 유지")
+
+        # 색공간 설정 버튼
+        self.color_settings_btn = QPushButton("🎨")
+        self.color_settings_btn.setMaximumWidth(30)
+        self.color_settings_btn.setToolTip(f"색공간 설정\n현재: {settings.color_input_space} → {settings.color_output_space}")
+        self.color_settings_btn.clicked.connect(self.show_color_settings)
+
+        # 현재 색공간 라벨
+        self.color_info_label = QLabel(f"({settings.color_output_space})")
+        self.color_info_label.setStyleSheet("color: #4db8c4; font-size: 8pt;")
 
         options_layout.addWidget(self.left_check)
         options_layout.addWidget(self.right_check)
@@ -989,6 +1000,8 @@ class FarmUI(QMainWindow):
         options_layout.addWidget(self.clip_folder_check)
         options_layout.addWidget(self.separate_check)
         options_layout.addWidget(self.aces_check)
+        options_layout.addWidget(self.color_settings_btn)
+        options_layout.addWidget(self.color_info_label)
         options_layout.addStretch()
         layout.addLayout(options_layout)
 
@@ -1406,10 +1419,10 @@ class FarmUI(QMainWindow):
             f"{total}개의 작업이 렌더팜에 제출되었습니다.\n\n{output_info}"
         )
 
-        # 제출 후 파일 목록 초기화 (선택사항)
-        # self.selected_files.clear()
-        # self.file_list_widget.clear()
-        # self.update_file_count()
+        # 제출 후 파일 목록 초기화
+        self.selected_files.clear()
+        self.file_list_widget.clear()
+        self.update_file_count()
 
     def start_worker(self):
         """워커 시작"""
@@ -1454,6 +1467,16 @@ class FarmUI(QMainWindow):
                 f"공용 저장소: {settings.farm_root}\n"
                 f"CLI 경로: {settings.cli_path}\n"
                 f"병렬 처리: {settings.parallel_workers}"
+            )
+
+    def show_color_settings(self):
+        """색공간 설정 다이얼로그 표시"""
+        dialog = ColorSpaceDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            # 색공간 라벨 업데이트
+            self.color_info_label.setText(f"({settings.color_output_space})")
+            self.color_settings_btn.setToolTip(
+                f"색공간 설정\n현재: {settings.color_input_space} → {settings.color_output_space}"
             )
 
     def append_worker_log(self, text):

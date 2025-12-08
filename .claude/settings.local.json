@@ -53,7 +53,10 @@
       "Bash(timeout 20 P:/00-GIGA/BRAW_CLI/build/bin/braw_cli.exe:*)",
       "Bash(timeout 30 ./braw_cli.exe:*)",
       "Bash(timeout 60 ./braw_cli.exe:*)",
-      "Bash(cmd /c \"cd /d P:\\00-GIGA\\BRAW_CLI\\build\\bin && braw_cli.exe P:\\00-GIGA\\BRAW_CLI\\A001_12031635_C012.braw test_aces2.exr 0 left --aces 2>&1\")"
+      "Bash(cmd /c \"cd /d P:\\00-GIGA\\BRAW_CLI\\build\\bin && braw_cli.exe P:\\00-GIGA\\BRAW_CLI\\A001_12031635_C012.braw test_aces2.exr 0 left --aces 2>&1\")",
+      "Bash(cmd /c \"cd /d P:\\00-GIGA\\BRAW_CLI\\build\\bin && del test_preset.exr 2>nul && braw_cli.exe P:\\00-GIGA\\BRAW_CLI\\A001_12031635_C012.braw test_preset.exr 0 left --aces \"\"--input-cs=BMDFilm WideGamut Gen5\"\" --output-cs=ACEScg 2>&1\")",
+      "Bash(cmd /c \"cd /d P:\\00-GIGA\\BRAW_CLI\\build\\bin && braw_cli.exe P:\\00-GIGA\\BRAW_CLI\\A001_12031635_C012.braw test_preset.exr 0 left --aces --input-cs=BMDFilm_WideGamut_Gen5 --output-cs=ACEScg 2>&1\")",
+      "Bash(powershell.exe -NoProfile -Command \"cd ''P:\\00-GIGA\\BRAW_CLI\\build\\bin''; .\\braw_cli.exe ''P:\\00-GIGA\\BRAW_CLI\\A001_12031635_C012.braw'' test_preset.exr 0 left --aces ''--input-cs=BMDFilm WideGamut Gen5'' --output-cs=ACEScg 2>&1\")"
     ],
     "deny": [],
     "ask": []
