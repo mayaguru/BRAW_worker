@@ -45,6 +45,7 @@ class WorkerInfo:
         self.current_clip_name = ""
         self.total_errors = 0
         self.current_processed = 0
+        self.current_total_frames = 0  # 현재 작업의 전체 프레임 수
 
     @staticmethod
     def get_ip():
@@ -69,7 +70,8 @@ class WorkerInfo:
             "current_job_id": self.current_job_id,
             "current_clip_name": self.current_clip_name,
             "total_errors": self.total_errors,
-            "current_processed": self.current_processed
+            "current_processed": self.current_processed,
+            "current_total_frames": self.current_total_frames
         }
 
     @classmethod
@@ -86,6 +88,7 @@ class WorkerInfo:
         w.current_clip_name = data.get("current_clip_name", "")
         w.total_errors = data.get("total_errors", 0)
         w.current_processed = data.get("current_processed", 0)
+        w.current_total_frames = data.get("current_total_frames", 0)
         return w
 
 
@@ -100,6 +103,9 @@ class RenderJob:
         self.eyes = ["left", "right"]
         self.format = "exr"
         self.separate_folders = False
+        self.use_aces = True  # ACES 색공간 변환 사용 여부
+        self.color_input_space = "Linear BMD WideGamut Gen5"  # 입력 색공간
+        self.color_output_space = "ACEScg"  # 출력 색공간
         self.created_at = datetime.now()
         self.created_by = socket.gethostname()
 
@@ -113,6 +119,9 @@ class RenderJob:
             "eyes": self.eyes,
             "format": self.format,
             "separate_folders": self.separate_folders,
+            "use_aces": self.use_aces,
+            "color_input_space": self.color_input_space,
+            "color_output_space": self.color_output_space,
             "created_at": self.created_at.isoformat(),
             "created_by": self.created_by
         }
@@ -127,6 +136,9 @@ class RenderJob:
         job.eyes = data["eyes"]
         job.format = data["format"]
         job.separate_folders = data["separate_folders"]
+        job.use_aces = data.get("use_aces", True)  # 기본값 True
+        job.color_input_space = data.get("color_input_space", "Linear BMD WideGamut Gen5")
+        job.color_output_space = data.get("color_output_space", "ACEScg")
         job.created_at = datetime.fromisoformat(data["created_at"])
         job.created_by = data["created_by"]
         return job

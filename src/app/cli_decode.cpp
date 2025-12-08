@@ -29,6 +29,10 @@ struct Arguments {
     uint32_t frame_index{0};
     EyeMode eye_mode{EyeMode::kLeft};
     OutputFormat format{OutputFormat::kPPM};
+    bool use_aces{false};  // 색공간 변환 사용 여부
+    bool apply_gamma{false};  // 뷰포트 감마 (Rec.709) 적용 여부
+    std::string input_colorspace{"BMDFilm WideGamut Gen5"};  // 고정값
+    std::string output_colorspace{"ACEScg"};
 };
 
 std::optional<EyeMode> parse_eye_mode(const std::string& token) {
@@ -87,6 +91,17 @@ std::optional<Arguments> parse_arguments(int argc, char** argv) {
             return std::nullopt;
         }
         args.eye_mode = *mode;
+    }
+
+    // 플래그 파싱 (모든 인자 검사)
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--aces") {
+            args.use_aces = true;
+        } else if (arg == "--gamma") {
+            args.apply_gamma = true;
+        }
+        // --input-cs, --output-cs 옵션은 무시 (하드코딩된 값 사용)
     }
 
     return args;
@@ -169,8 +184,18 @@ auto decode_and_write = [&](braw::StereoView view, const std::filesystem::path& 
         std::cout << "[DEBUG] 8. Frame decoded successfully\n";
         bool ok = false;
         if (args->format == OutputFormat::kEXR) {
-            std::cout << "[DEBUG] 9. Writing EXR...\n";
-            ok = braw::write_exr_half_dwaa(output_path, buffer, 45.0f);
+            std::cout << "[DEBUG] 9. Writing EXR...";
+            if (args->use_aces) {
+                std::cout << " (색공간 변환: " << args->input_colorspace << " → " << args->output_colorspace << ")";
+            }
+            if (args->apply_gamma) {
+                std::cout << " (Rec.709 감마 적용)";
+            }
+            std::cout << "\n";
+            ok = braw::write_exr_half_dwaa(output_path, buffer, 45.0f,
+                args->use_aces ? args->input_colorspace : "",
+                args->use_aces ? args->output_colorspace : "",
+                args->apply_gamma);
         } else {
             std::cout << "[DEBUG] 9. Writing PPM...\n";
             ok = braw::write_ppm(output_path, buffer);

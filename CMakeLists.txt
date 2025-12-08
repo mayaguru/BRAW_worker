@@ -26,10 +26,12 @@ endforeach()
 
 option(BRAW_ENABLE_SDK "Enable integration with the Blackmagic RAW SDK" ON)
 option(OPENEXR_ENABLE "Enable OpenEXR export support" ON)
+option(OCIO_ENABLE "Enable OpenColorIO support for ACES workflow" ON)
 
 set(BRAW_SDK_ROOT "" CACHE PATH "Blackmagic RAW SDK root directory")
 set(OPENEXR_ROOT "" CACHE PATH "OpenEXR install root directory")
 set(OPENEXR_BIN_DIR "" CACHE PATH "OpenEXR runtime bin directory")
+set(OCIO_ROOT "" CACHE PATH "OpenColorIO install root directory")
 
 if (NOT BRAW_SDK_ROOT)
     set(_braw_default "${CMAKE_SOURCE_DIR}/third_party/BlackmagicRAW")
@@ -140,6 +142,56 @@ if (OPENEXR_ENABLE)
             message(STATUS "OpenEXR found manually: ${OPENEXR_INCLUDE_DIR}")
         else()
             message(WARNING "OpenEXR 라이브러리를 찾을 수 없습니다. EXR 내보내기가 비활성화됩니다.")
+        endif()
+    endif()
+endif()
+
+# OpenColorIO 검색
+set(OCIO_FOUND OFF)
+set(OCIO_INCLUDE_DIR "")
+set(OCIO_LIBS "")
+if (OCIO_ENABLE)
+    # vcpkg toolchain을 사용하는 경우 find_package 우선 시도
+    find_package(OpenColorIO CONFIG QUIET)
+    if (OpenColorIO_FOUND)
+        set(OCIO_FOUND ON)
+        set(OCIO_LIBS OpenColorIO::OpenColorIO)
+        get_target_property(OCIO_INCLUDE_DIR OpenColorIO::OpenColorIO INTERFACE_INCLUDE_DIRECTORIES)
+        message(STATUS "OpenColorIO found via find_package: ${OCIO_INCLUDE_DIR}")
+    else()
+        # 수동 검색 폴백
+        list(APPEND _ocio_include_search
+            "${OCIO_ROOT}/include"
+            "${OCIO_ROOT}/Include"
+            "${CMAKE_SOURCE_DIR}/third_party/OpenColorIO/include"
+            "C:/vcpkg/installed/x64-windows/include"
+            "D:/vcpkg/installed/x64-windows/include")
+        foreach(_inc ${_ocio_include_search})
+            if (EXISTS "${_inc}/OpenColorIO/OpenColorIO.h")
+                set(OCIO_INCLUDE_DIR "${_inc}")
+                break()
+            endif()
+        endforeach()
+
+        set(_ocio_lib_search_dirs
+            "${OCIO_ROOT}/lib"
+            "${OCIO_ROOT}/lib64"
+            "${OCIO_ROOT}/Lib"
+            "${CMAKE_SOURCE_DIR}/third_party/OpenColorIO/lib"
+            "C:/vcpkg/installed/x64-windows/lib"
+            "D:/vcpkg/installed/x64-windows/lib")
+
+        find_library(OCIO_LIB
+            NAMES OpenColorIO OpenColorIO_2_4 OpenColorIO_2_3 OpenColorIO_2_2
+            PATHS ${_ocio_lib_search_dirs}
+            NO_DEFAULT_PATH)
+
+        if (OCIO_INCLUDE_DIR AND OCIO_LIB)
+            set(OCIO_FOUND ON)
+            set(OCIO_LIBS ${OCIO_LIB})
+            message(STATUS "OpenColorIO found manually: ${OCIO_INCLUDE_DIR}")
+        else()
+            message(WARNING "OpenColorIO 라이브러리를 찾을 수 없습니다. ACES 색공간 변환이 비활성화됩니다.")
         endif()
     endif()
 endif()

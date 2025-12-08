@@ -16,12 +16,238 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QPushButton, QLineEdit,
                                QTextEdit, QGroupBox, QRadioButton, QCheckBox,
                                QFileDialog, QSpinBox, QTableWidget, QTableWidgetItem,
-                               QTabWidget, QProgressBar, QMessageBox, QMenu, QDialog)
+                               QTabWidget, QProgressBar, QMessageBox, QMenu, QDialog,
+                               QListWidget, QListWidgetItem, QComboBox, QInputDialog)
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QUrl
 from PySide6.QtGui import QFont, QColor, QAction, QDesktopServices
 
 from farm_core import FarmManager, RenderJob, WorkerInfo
 from config import settings
+
+
+def parse_ocio_colorspaces(config_path: str) -> list:
+    """OCIO config 파일에서 색공간 목록 파싱"""
+    colorspaces = []
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # colorspaces 섹션에서 name 추출
+        import re
+        # "- !<ColorSpace>" 블록에서 name: 추출
+        pattern = r'- !<ColorSpace>\s*\n(?:.*\n)*?\s*name:\s*([^\n]+)'
+        matches = re.findall(pattern, content)
+        for match in matches:
+            name = match.strip().strip('"').strip("'")
+            if name:
+                colorspaces.append(name)
+    except Exception as e:
+        print(f"OCIO 파싱 오류: {e}")
+
+    return sorted(set(colorspaces))
+
+
+class ColorSpaceDialog(QDialog):
+    """색공간 설정 다이얼로그"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("색공간 설정")
+        self.setMinimumWidth(600)
+        self.colorspaces = []
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # OCIO Config 파일 선택
+        config_layout = QHBoxLayout()
+        config_layout.addWidget(QLabel("OCIO Config:"))
+        self.config_input = QLineEdit(settings.ocio_config_path)
+        self.config_input.setPlaceholderText("OCIO config 파일 선택...")
+        browse_btn = QPushButton("📁")
+        browse_btn.setMaximumWidth(40)
+        browse_btn.clicked.connect(self.browse_config)
+        load_btn = QPushButton("로드")
+        load_btn.clicked.connect(self.load_colorspaces)
+        config_layout.addWidget(self.config_input)
+        config_layout.addWidget(browse_btn)
+        config_layout.addWidget(load_btn)
+        layout.addLayout(config_layout)
+
+        # 입력 색공간
+        input_layout = QHBoxLayout()
+        input_layout.addWidget(QLabel("입력 색공간:"))
+        self.input_combo = QComboBox()
+        self.input_combo.setEditable(True)
+        self.input_combo.setMinimumWidth(300)
+        self.input_combo.currentTextChanged.connect(self.on_colorspace_changed)
+        input_layout.addWidget(self.input_combo)
+        input_layout.addStretch()
+        layout.addLayout(input_layout)
+
+        # 출력 색공간
+        output_layout = QHBoxLayout()
+        output_layout.addWidget(QLabel("출력 색공간:"))
+        self.output_combo = QComboBox()
+        self.output_combo.setEditable(True)
+        self.output_combo.setMinimumWidth(300)
+        self.output_combo.currentTextChanged.connect(self.on_colorspace_changed)
+        output_layout.addWidget(self.output_combo)
+        output_layout.addStretch()
+        layout.addLayout(output_layout)
+
+        # 프리셋 관리
+        preset_group = QGroupBox("프리셋")
+        preset_layout = QVBoxLayout(preset_group)
+
+        preset_btn_layout = QHBoxLayout()
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumWidth(200)
+        self.update_preset_combo()
+        self.preset_combo.currentTextChanged.connect(self.load_preset)
+
+        save_preset_btn = QPushButton("💾 저장")
+        save_preset_btn.clicked.connect(self.save_preset)
+        delete_preset_btn = QPushButton("🗑️ 삭제")
+        delete_preset_btn.clicked.connect(self.delete_preset)
+
+        preset_btn_layout.addWidget(QLabel("프리셋:"))
+        preset_btn_layout.addWidget(self.preset_combo)
+        preset_btn_layout.addWidget(save_preset_btn)
+        preset_btn_layout.addWidget(delete_preset_btn)
+        preset_btn_layout.addStretch()
+        preset_layout.addLayout(preset_btn_layout)
+
+        layout.addWidget(preset_group)
+
+        # 버튼
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("확인")
+        ok_btn.clicked.connect(self.accept_settings)
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        # 초기 로드
+        if settings.ocio_config_path:
+            self.load_colorspaces()
+        else:
+            # 기본값 설정
+            self.input_combo.addItem(settings.color_input_space)
+            self.output_combo.addItem(settings.color_output_space)
+
+        # 현재 설정 선택
+        self.input_combo.setCurrentText(settings.color_input_space)
+        self.output_combo.setCurrentText(settings.color_output_space)
+
+    def browse_config(self):
+        """OCIO config 파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "OCIO Config 파일 선택", "",
+            "OCIO Config (*.ocio);;모든 파일 (*.*)"
+        )
+        if file_path:
+            self.config_input.setText(file_path)
+            self.load_colorspaces()
+
+    def load_colorspaces(self):
+        """OCIO config에서 색공간 목록 로드"""
+        config_path = self.config_input.text()
+        if not config_path or not Path(config_path).exists():
+            QMessageBox.warning(self, "경고", "유효한 OCIO config 파일을 선택하세요.")
+            return
+
+        self.colorspaces = parse_ocio_colorspaces(config_path)
+
+        if not self.colorspaces:
+            QMessageBox.warning(self, "경고", "색공간을 찾을 수 없습니다.")
+            return
+
+        # 현재 선택 저장
+        current_input = self.input_combo.currentText()
+        current_output = self.output_combo.currentText()
+
+        # 콤보박스 업데이트
+        self.input_combo.clear()
+        self.output_combo.clear()
+        self.input_combo.addItems(self.colorspaces)
+        self.output_combo.addItems(self.colorspaces)
+
+        # 이전 선택 복원
+        if current_input in self.colorspaces:
+            self.input_combo.setCurrentText(current_input)
+        if current_output in self.colorspaces:
+            self.output_combo.setCurrentText(current_output)
+
+        QMessageBox.information(self, "로드 완료", f"{len(self.colorspaces)}개의 색공간을 로드했습니다.")
+
+    def update_preset_combo(self):
+        """프리셋 콤보박스 업데이트"""
+        self.preset_combo.clear()
+        self.preset_combo.addItem("(프리셋 선택)")
+        for name in settings.color_presets.keys():
+            self.preset_combo.addItem(name)
+
+    def load_preset(self, name):
+        """프리셋 로드"""
+        if name == "(프리셋 선택)" or name not in settings.color_presets:
+            return
+
+        preset = settings.color_presets[name]
+        input_space = preset.get("input", "")
+        output_space = preset.get("output", "")
+
+        # UI 업데이트
+        self.input_combo.setCurrentText(input_space)
+        self.output_combo.setCurrentText(output_space)
+
+        # settings도 업데이트하고 저장
+        settings.color_input_space = input_space
+        settings.color_output_space = output_space
+        settings.save()
+        print(f"[INFO] 프리셋 적용: {input_space} → {output_space}")
+
+    def save_preset(self):
+        """프리셋 저장"""
+        name, ok = QInputDialog.getText(self, "프리셋 저장", "프리셋 이름:")
+        if ok and name:
+            settings.color_presets[name] = {
+                "input": self.input_combo.currentText(),
+                "output": self.output_combo.currentText()
+            }
+            settings.save()
+            self.update_preset_combo()
+            QMessageBox.information(self, "저장 완료", f"프리셋 '{name}'이(가) 저장되었습니다.")
+
+    def delete_preset(self):
+        """프리셋 삭제"""
+        name = self.preset_combo.currentText()
+        if name == "(프리셋 선택)":
+            return
+
+        if name in settings.color_presets:
+            del settings.color_presets[name]
+            settings.save()
+            self.update_preset_combo()
+            QMessageBox.information(self, "삭제 완료", f"프리셋 '{name}'이(가) 삭제되었습니다.")
+
+    def on_colorspace_changed(self, text):
+        """색공간 콤보박스 변경 시 settings 즉시 업데이트"""
+        settings.color_input_space = self.input_combo.currentText()
+        settings.color_output_space = self.output_combo.currentText()
+        settings.save()
+
+    def accept_settings(self):
+        """설정 적용"""
+        settings.ocio_config_path = self.config_input.text()
+        settings.color_input_space = self.input_combo.currentText()
+        settings.color_output_space = self.output_combo.currentText()
+        settings.save()
+        self.accept()
 
 
 class SettingsDialog(QDialog):
@@ -236,6 +462,9 @@ class WorkerThread(QThread):
         self.farm_manager.worker.current_job_id = job.job_id
         self.farm_manager.worker.current_clip_name = Path(job.clip_path).name
         self.farm_manager.worker.current_processed = 0
+        # 전체 프레임 수 계산 (프레임 범위 * eye 개수)
+        frame_count = (job.end_frame - job.start_frame + 1) * len(job.eyes)
+        self.farm_manager.worker.current_total_frames = frame_count
         self.farm_manager.update_worker()
 
         # 프레임 찾아서 처리
@@ -251,6 +480,7 @@ class WorkerThread(QThread):
         if not tasks:
             # 처리할 프레임이 없으면 idle로 변경
             self.farm_manager.worker.status = "idle"
+            self.farm_manager.worker.current_total_frames = 0
             self.farm_manager.update_worker()
             return
 
@@ -319,6 +549,7 @@ class WorkerThread(QThread):
         self.farm_manager.worker.current_job_id = ""
         self.farm_manager.worker.current_clip_name = ""
         self.farm_manager.worker.current_processed = 0
+        self.farm_manager.worker.current_total_frames = 0
         self.farm_manager.update_worker()
 
     def process_frame(self, job: RenderJob, frame_idx: int, eye: str) -> bool:
@@ -347,6 +578,14 @@ class WorkerThread(QThread):
             str(frame_idx),
             eye
         ]
+
+        # 색공간 변환 플래그 추가 (EXR 출력일 때만)
+        # 색공간은 CLI에 하드코딩됨 (BMDFilm WideGamut Gen5 → ACEScg)
+        if job.format == "exr" and job.use_aces:
+            cmd.append("--aces")
+
+        # 디버그: 실행 명령 출력
+        print(f"[DEBUG] CMD: {' '.join(cmd)}")
 
         try:
             result = subprocess.run(
@@ -399,55 +638,302 @@ class FarmUI(QMainWindow):
         self.setWindowTitle("BRAW Render Farm")
         self.setGeometry(100, 100, 1400, 900)
 
+        # 다크 테마 스타일시트 적용
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QWidget {
+                background-color: #3a3a3a;
+                color: #f0f0f0;
+                font-size: 9pt;
+            }
+            QGroupBox {
+                background-color: #323232;
+                border: 2px solid #505050;
+                border-radius: 8px;
+                margin-top: 15px;
+                padding: 15px;
+                padding-top: 25px;
+                font-weight: bold;
+                color: #4db8c4;
+                font-size: 10pt;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 15px;
+                top: 5px;
+                padding: 0 8px;
+                background-color: #323232;
+            }
+            QLabel {
+                background-color: transparent;
+                color: #f0f0f0;
+            }
+            QLineEdit, QSpinBox, QTextEdit {
+                background-color: #4a4a4a;
+                border: 1px solid #606060;
+                border-radius: 3px;
+                padding: 5px;
+                color: #ffffff;
+            }
+            QLineEdit:focus, QSpinBox:focus {
+                border: 1px solid #0d7377;
+            }
+            QPushButton {
+                background-color: #505050;
+                border: 1px solid #606060;
+                border-radius: 3px;
+                padding: 6px 12px;
+                color: #ffffff;
+            }
+            QPushButton:hover {
+                background-color: #5a5a5a;
+                border: 1px solid #707070;
+            }
+            QPushButton:pressed {
+                background-color: #454545;
+            }
+            QCheckBox, QRadioButton {
+                background-color: transparent;
+                color: #f0f0f0;
+            }
+            QCheckBox::indicator, QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #606060;
+                border-radius: 3px;
+                background-color: #4a4a4a;
+            }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+                background-color: #0d7377;
+                border: 1px solid #0d7377;
+            }
+            QTableWidget {
+                background-color: #2e2e2e;
+                alternate-background-color: #353535;
+                gridline-color: #4a4a4a;
+                border: 2px solid #505050;
+                border-radius: 5px;
+                color: #f0f0f0;
+            }
+            QTableWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #404040;
+            }
+            QTableWidget::item:selected {
+                background-color: #0d7377;
+                color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #282828;
+                color: #4db8c4;
+                padding: 8px;
+                border: none;
+                border-bottom: 2px solid #0d7377;
+                font-weight: bold;
+                font-size: 9pt;
+            }
+            QTextEdit {
+                background-color: #2a2a2a;
+                border: 2px solid #505050;
+                border-radius: 5px;
+                color: #f0f0f0;
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 9pt;
+                padding: 5px;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #3a3a3a;
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #606060;
+                min-height: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #707070;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: #3a3a3a;
+                height: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #606060;
+                min-width: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #707070;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+        """)
+
         # 메인 위젯
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 상단 툴바
+        toolbar = QWidget()
+        toolbar.setStyleSheet("background-color: #2a2a2a; border-bottom: 2px solid #505050;")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(15, 8, 15, 8)
+
+        # 타이틀
+        title_label = QLabel("🎬 BRAW Render Farm")
+        title_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4db8c4;")
+        toolbar_layout.addWidget(title_label)
+        toolbar_layout.addStretch()
+
+        # 설정 버튼 (크고 눈에 띄게)
+        settings_btn = QPushButton("⚙️ 설정")
+        settings_btn.setToolTip("렌더팜 설정\n공용 저장소 경로, CLI 실행 파일 경로 지정")
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #505050;
+                color: white;
+                padding: 8px 16px;
+                font-size: 10pt;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #5a5a5a;
+            }
+            QPushButton:pressed {
+                background-color: #454545;
+            }
+        """)
+        settings_btn.clicked.connect(self.show_settings)
+        toolbar_layout.addWidget(settings_btn)
+
+        main_layout.addWidget(toolbar)
+
+        # 컨텐츠 영역 - 스플리터 사용
+        from PySide6.QtWidgets import QSplitter
+        from PySide6.QtCore import Qt
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #505050;
+                width: 4px;
+            }
+            QSplitter::handle:hover {
+                background-color: #0d7377;
+            }
+        """)
 
         # 왼쪽 패널: 작업 제출 + 워커 제어
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
+        left_layout.setSpacing(15)  # 섹션 간 간격
+        left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.addWidget(self.create_submit_section())
         left_layout.addWidget(self.create_worker_section())
-        left_panel.setMaximumWidth(500)
+        left_layout.addStretch()  # 아래쪽 여백 추가
 
         # 오른쪽 패널: 모니터링 + 로그
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
+        right_layout.setSpacing(15)  # 섹션 간 간격
+        right_layout.setContentsMargins(10, 10, 10, 10)
         right_layout.addWidget(self.create_monitor_section())
         right_layout.addWidget(self.create_log_section())
 
-        main_layout.addWidget(left_panel)
-        main_layout.addWidget(right_panel, stretch=1)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setSizes([500, 900])  # 초기 크기 비율
+
+        main_layout.addWidget(splitter)
 
     def create_submit_section(self):
         """작업 제출 섹션"""
         widget = QGroupBox("📤 작업 제출")
+        widget.setMaximumHeight(450)  # 전체 섹션 최대 높이 제한
         layout = QVBoxLayout(widget)
 
-        # 파일 경로
-        path_layout = QHBoxLayout()
-        self.clip_input = QLineEdit()
-        self.clip_input.setPlaceholderText("BRAW 파일 선택...")
-        browse_btn = QPushButton("📁")
-        browse_btn.setMaximumWidth(40)
-        browse_btn.clicked.connect(self.browse_clip)
-        path_layout.addWidget(QLabel("파일:"))
-        path_layout.addWidget(self.clip_input)
-        path_layout.addWidget(browse_btn)
-        layout.addLayout(path_layout)
+        # 파일 선택 영역 (드래그 앤 드롭 지원)
+        file_area = QWidget()
+        file_area.setAcceptDrops(True)
+        file_area.setMaximumHeight(220)  # 최대 높이 제한
+        file_area.dragEnterEvent = self.drag_enter_event
+        file_area.dropEvent = self.drop_event
+        file_area.setStyleSheet("""
+            QWidget {
+                border: 2px dashed #505050;
+                border-radius: 8px;
+                background-color: #323232;
+                padding: 10px;
+            }
+        """)
+        file_layout = QVBoxLayout(file_area)
 
-        # 파일 정보
-        self.file_info_label = QLabel("파일을 선택하면 정보가 표시됩니다")
-        self.file_info_label.setStyleSheet("color: gray; font-style: italic; padding: 5px;")
-        layout.addWidget(self.file_info_label)
+        # 파일 선택 버튼
+        path_layout = QHBoxLayout()
+        browse_btn = QPushButton("📁 파일 선택 (다중 선택 가능)")
+        browse_btn.setToolTip("BRAW 파일을 선택하세요 (Ctrl+클릭으로 여러 파일 선택)\n또는 파일을 드래그 앤 드롭하세요")
+        browse_btn.clicked.connect(self.browse_clips)
+        path_layout.addWidget(browse_btn)
+        file_layout.addLayout(path_layout)
+
+        # 선택된 파일 목록
+        self.file_list_widget = QListWidget()
+        self.file_list_widget.setMaximumHeight(120)
+        self.file_list_widget.setToolTip("선택된 BRAW 파일 목록\n클릭: 프레임 범위 업데이트 | 더블클릭: 제거")
+        self.file_list_widget.itemClicked.connect(self.on_file_selected)
+        self.file_list_widget.itemDoubleClicked.connect(self.remove_file_from_list)
+        self.file_list_widget.setStyleSheet("""
+            QListWidget {
+                background-color: #2a2a2a;
+                border: 1px solid #404040;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 4px;
+                border-bottom: 1px solid #333333;
+            }
+            QListWidget::item:selected {
+                background-color: #0d7377;
+            }
+        """)
+        file_layout.addWidget(self.file_list_widget)
+
+        # 파일 카운터
+        self.file_count_label = QLabel("선택된 파일: 0개")
+        self.file_count_label.setStyleSheet("color: #4db8c4; font-weight: bold; padding: 5px;")
+        file_layout.addWidget(self.file_count_label)
+
+        layout.addWidget(file_area)
+
+        # 저장된 파일 경로 리스트
+        self.selected_files = []
 
         # 출력 폴더
         output_path_layout = QHBoxLayout()
         self.output_input = QLineEdit()
+        self.output_input.setText(settings.last_output_folder)  # 마지막 사용 폴더 로드
         self.output_input.setPlaceholderText("출력 폴더 선택...")
+        self.output_input.setToolTip("렌더링된 이미지 시퀀스가 저장될 폴더")
         output_browse_btn = QPushButton("📁")
         output_browse_btn.setMaximumWidth(40)
+        output_browse_btn.setToolTip("출력 폴더 찾아보기")
         output_browse_btn.clicked.connect(self.browse_output)
         output_path_layout.addWidget(QLabel("출력:"))
         output_path_layout.addWidget(self.output_input)
@@ -458,9 +944,11 @@ class FarmUI(QMainWindow):
         frame_layout = QHBoxLayout()
         self.start_spin = QSpinBox()
         self.start_spin.setRange(0, 100000)
+        self.start_spin.setToolTip("렌더링 시작 프레임 번호 (0부터 시작)")
         self.end_spin = QSpinBox()
         self.end_spin.setRange(0, 100000)
         self.end_spin.setValue(29)
+        self.end_spin.setToolTip("렌더링 종료 프레임 번호")
         frame_layout.addWidget(QLabel("프레임:"))
         frame_layout.addWidget(self.start_spin)
         frame_layout.addWidget(QLabel("~"))
@@ -471,38 +959,56 @@ class FarmUI(QMainWindow):
         options_layout = QHBoxLayout()
         self.left_check = QCheckBox("L")
         self.left_check.setChecked(True)
+        self.left_check.setToolTip("왼쪽 눈 렌더링 (스테레오 영상)")
         self.right_check = QCheckBox("R")
         self.right_check.setChecked(True)
+        self.right_check.setToolTip("오른쪽 눈 렌더링 (스테레오 영상)")
         self.exr_radio = QRadioButton("EXR")
         self.exr_radio.setChecked(True)
+        self.exr_radio.setToolTip("OpenEXR 포맷 (32bit float, 고품질)\n대용량, 후반작업에 적합")
         self.ppm_radio = QRadioButton("PPM")
-        self.separate_check = QCheckBox("폴더분리")
+        self.ppm_radio.setToolTip("PPM 포맷 (8bit, 빠른 처리)\n용량 작음, 미리보기/테스트용")
+        self.clip_folder_check = QCheckBox("영상별폴더")
+        self.clip_folder_check.setChecked(True)
+        self.clip_folder_check.setToolTip("각 영상 파일마다 별도 폴더 생성\n체크: 출력폴더/영상이름/ 에 저장\n해제: 출력폴더/ 에 바로 저장")
+
+        self.separate_check = QCheckBox("L/R분리")
         self.separate_check.setChecked(True)  # 폴더분리 기본값을 True로 설정
+        self.separate_check.setToolTip("L/R 이미지를 별도 폴더에 저장\n체크: L/, R/ 폴더로 분리\n해제: 한 폴더에 _L, _R 접미사로 저장")
+
+        self.aces_check = QCheckBox("ACEScg")
+        self.aces_check.setChecked(True)  # 색공간 변환 기본값 True
+        self.aces_check.setToolTip("OCIO 색공간 변환 적용\nBMDFilm WideGamut Gen5 → ACEScg")
+
         options_layout.addWidget(self.left_check)
         options_layout.addWidget(self.right_check)
         options_layout.addWidget(QLabel("|"))
         options_layout.addWidget(self.exr_radio)
         options_layout.addWidget(self.ppm_radio)
         options_layout.addWidget(QLabel("|"))
+        options_layout.addWidget(self.clip_folder_check)
         options_layout.addWidget(self.separate_check)
+        options_layout.addWidget(self.aces_check)
         options_layout.addStretch()
         layout.addLayout(options_layout)
 
         # 제출 버튼
         submit_btn = QPushButton("✅ 작업 제출")
+        submit_btn.setToolTip("렌더팜에 작업을 제출합니다\n워커들이 자동으로 프레임을 분산 처리합니다")
         submit_btn.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
+                background-color: #0d7377;
                 color: white;
                 padding: 8px;
                 font-weight: bold;
+                border: none;
             }
             QPushButton:hover {
-                background-color: #45a049;
+                background-color: #14a1a8;
                 color: white;
             }
             QPushButton:pressed {
-                background-color: #3d8b40;
+                background-color: #0a5c5f;
                 color: white;
             }
         """)
@@ -514,71 +1020,71 @@ class FarmUI(QMainWindow):
     def create_worker_section(self):
         """워커 제어 섹션"""
         widget = QGroupBox("⚙️ 워커 제어")
+        widget.setMaximumHeight(200)  # 전체 섹션 최대 높이 제한
         layout = QVBoxLayout(widget)
 
         # 워커 정보 - 컴팩트하게
         info_layout = QVBoxLayout()
         self.worker_id_label = QLabel(f"🖥️ {self.farm_manager.worker.worker_id} ({self.farm_manager.worker.ip})")
-        self.worker_id_label.setStyleSheet("font-weight: bold;")
+        self.worker_id_label.setStyleSheet("font-weight: bold; color: #14a1a8;")
+        self.worker_id_label.setToolTip("현재 워커 PC의 컴퓨터 이름과 IP 주소")
         self.network_status_label = QLabel("🟢 네트워크: 연결됨")
-        self.network_status_label.setStyleSheet("color: green; font-weight: bold;")
+        self.network_status_label.setStyleSheet("color: #66bb6a; font-weight: bold;")
+        self.network_status_label.setToolTip("공유 저장소와의 네트워크 연결 상태")
         info_layout.addWidget(self.worker_id_label)
         info_layout.addWidget(self.network_status_label)
         layout.addLayout(info_layout)
 
-        # 설정
+        # 병렬 처리 설정
         settings_layout = QHBoxLayout()
         settings_layout.addWidget(QLabel("병렬:"))
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 50)
         self.parallel_spin.setValue(settings.parallel_workers)  # 설정에서 기본값 가져오기
+        self.parallel_spin.setToolTip("동시에 처리할 프레임 수\nCPU 코어 수에 맞춰 조정하세요")
         settings_layout.addWidget(self.parallel_spin)
         settings_layout.addStretch()
-
-        # 설정 버튼
-        settings_btn = QPushButton("⚙️")
-        settings_btn.setMaximumWidth(40)
-        settings_btn.setToolTip("렌더팜 설정")
-        settings_btn.clicked.connect(self.show_settings)
-        settings_layout.addWidget(settings_btn)
-
         layout.addLayout(settings_layout)
 
         # 시작/중지 버튼
         btn_layout = QHBoxLayout()
         self.start_worker_btn = QPushButton("▶️ 시작")
+        self.start_worker_btn.setToolTip("워커를 시작합니다\n렌더팜 작업을 자동으로 가져와 처리합니다")
         self.start_worker_btn.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
+                background-color: #0d7377;
                 color: white;
                 padding: 8px;
                 font-weight: bold;
+                border: none;
             }
             QPushButton:hover {
-                background-color: #45a049;
+                background-color: #14a1a8;
                 color: white;
             }
             QPushButton:pressed {
-                background-color: #3d8b40;
+                background-color: #0a5c5f;
                 color: white;
             }
         """)
         self.start_worker_btn.clicked.connect(self.start_worker)
 
         self.stop_worker_btn = QPushButton("⏹️ 중지")
+        self.stop_worker_btn.setToolTip("워커를 중지합니다\n현재 처리 중인 프레임은 완료됩니다")
         self.stop_worker_btn.setStyleSheet("""
             QPushButton {
-                background-color: #f44336;
+                background-color: #d9534f;
                 color: white;
                 padding: 8px;
                 font-weight: bold;
+                border: none;
             }
             QPushButton:hover {
-                background-color: #da190b;
+                background-color: #e57373;
                 color: white;
             }
             QPushButton:pressed {
-                background-color: #c1160a;
+                background-color: #c62828;
                 color: white;
             }
         """)
@@ -615,6 +1121,8 @@ class FarmUI(QMainWindow):
         self.jobs_table.setColumnCount(5)
         self.jobs_table.setHorizontalHeaderLabels(["작업 ID", "파일", "범위", "진행률", "제출자"])
         self.jobs_table.verticalHeader().setVisible(False)
+        self.jobs_table.setSelectionBehavior(QTableWidget.SelectRows)  # 행 단위 선택
+        self.jobs_table.setSelectionMode(QTableWidget.ExtendedSelection)  # 다중 선택 허용
         self.jobs_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.jobs_table.customContextMenuRequested.connect(self.show_job_context_menu)
         layout.addWidget(QLabel("📋 작업 목록"))
@@ -635,13 +1143,113 @@ class FarmUI(QMainWindow):
 
         return widget
 
-    def browse_clip(self):
-        """클립 파일 선택"""
-        filename, _ = QFileDialog.getOpenFileName(self, "BRAW 파일 선택", "", "BRAW Files (*.braw)")
-        if filename:
-            self.clip_input.setText(filename)
-            # 자동으로 정보 가져오기
-            self.probe_clip()
+    def browse_clips(self):
+        """클립 파일 선택 (다중)"""
+        filenames, _ = QFileDialog.getOpenFileNames(self, "BRAW 파일 선택 (다중 선택 가능)", "", "BRAW Files (*.braw)")
+        if filenames:
+            self.add_files_to_list(filenames)
+
+    def drag_enter_event(self, event):
+        """드래그 진입 이벤트"""
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def drop_event(self, event):
+        """드롭 이벤트"""
+        files = []
+        for url in event.mimeData().urls():
+            file_path = url.toLocalFile()
+            if file_path.lower().endswith('.braw'):
+                files.append(file_path)
+
+        if files:
+            self.add_files_to_list(files)
+        else:
+            QMessageBox.warning(self, "경고", "BRAW 파일만 추가할 수 있습니다.")
+
+    def add_files_to_list(self, file_paths):
+        """파일 목록에 추가"""
+        added_count = 0
+        first_added = None
+
+        for file_path in file_paths:
+            # 중복 체크
+            if file_path not in self.selected_files:
+                self.selected_files.append(file_path)
+                # 파일 이름만 표시
+                from pathlib import Path
+                file_name = Path(file_path).name
+                self.file_list_widget.addItem(f"{file_name}")
+                added_count += 1
+
+                # 첫 번째로 추가된 파일 기억
+                if first_added is None:
+                    first_added = file_path
+
+        self.update_file_count()
+
+        # 첫 번째 파일의 프레임 범위 자동 감지
+        if first_added:
+            self.auto_detect_frame_range(first_added)
+
+    def on_file_selected(self, item):
+        """파일 목록에서 항목 클릭 시 프레임 범위 업데이트"""
+        row = self.file_list_widget.row(item)
+        if 0 <= row < len(self.selected_files):
+            self.auto_detect_frame_range(self.selected_files[row])
+
+    def remove_file_from_list(self, item):
+        """목록에서 파일 제거"""
+        row = self.file_list_widget.row(item)
+        if 0 <= row < len(self.selected_files):
+            del self.selected_files[row]
+            self.file_list_widget.takeItem(row)
+            self.update_file_count()
+
+            # 파일이 남아있으면 첫 번째 파일의 프레임 범위 다시 감지
+            if len(self.selected_files) > 0:
+                self.auto_detect_frame_range(self.selected_files[0])
+
+    def update_file_count(self):
+        """파일 카운트 업데이트"""
+        count = len(self.selected_files)
+        self.file_count_label.setText(f"선택된 파일: {count}개")
+        if count > 0:
+            self.file_count_label.setStyleSheet("color: #4db8c4; font-weight: bold; padding: 5px;")
+        else:
+            self.file_count_label.setStyleSheet("color: #888888; font-weight: bold; padding: 5px;")
+
+    def auto_detect_frame_range(self, clip_path):
+        """파일의 프레임 범위 자동 감지"""
+        try:
+            # CLI로 정보 가져오기
+            result = subprocess.run(
+                [str(self.cli_path), clip_path, "--info"],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10
+            )
+
+            if result.returncode == 0:
+                # 출력 파싱
+                info = {}
+                for line in result.stdout.splitlines():
+                    if "=" in line and not line.startswith("[DEBUG]"):
+                        key, value = line.strip().split("=", 1)
+                        info[key] = value
+
+                # 프레임 범위 업데이트
+                if "FRAME_COUNT" in info:
+                    frame_count = int(info["FRAME_COUNT"])
+                    self.start_spin.setValue(0)
+                    self.end_spin.setValue(frame_count - 1)  # 0-based index
+        except Exception as e:
+            # 실패해도 조용히 무시 (사용자가 수동으로 설정 가능)
+            pass
 
     def probe_clip(self):
         """클립 정보 가져오기"""
@@ -670,7 +1278,7 @@ class FarmUI(QMainWindow):
                         "프레임 범위를 수동으로 설정하세요.\n\n"
                         "렌더팜 워커 PC에서는 SDK가 설치되어 있어야 합니다.")
                     self.file_info_label.setText("⚠️ SDK 없음 - 수동 설정 필요")
-                    self.file_info_label.setStyleSheet("color: orange;")
+                    self.file_info_label.setStyleSheet("color: #ff9800;")
                 else:
                     QMessageBox.warning(self, "오류", f"파일 정보를 가져올 수 없습니다.\n{error_msg}")
                 return
@@ -695,7 +1303,7 @@ class FarmUI(QMainWindow):
 
                 info_text = f"📹 {width}x{height} @ {fps}fps | 프레임: {frame_count} | {stereo}"
                 self.file_info_label.setText(info_text)
-                self.file_info_label.setStyleSheet("color: green; font-weight: bold;")
+                self.file_info_label.setStyleSheet("color: #66bb6a; font-weight: bold;")
 
                 # 스테레오가 아니면 Right 체크 해제
                 if info.get("STEREO") != "true":
@@ -719,35 +1327,89 @@ class FarmUI(QMainWindow):
             self.output_input.setText(directory)
 
     def submit_job(self):
-        """작업 제출"""
-        clip_path = self.clip_input.text()
+        """작업 제출 (다중 파일 지원)"""
         output_dir = self.output_input.text()
 
-        if not clip_path or not output_dir:
-            QMessageBox.warning(self, "경고", "파일과 출력 폴더를 선택하세요.")
+        # 파일 체크
+        if len(self.selected_files) == 0:
+            QMessageBox.warning(self, "경고", "렌더링할 파일을 선택하세요.")
             return
 
-        # 작업 생성
-        job = RenderJob(f"job_{int(time.time())}")
-        job.clip_path = clip_path
-        job.output_dir = output_dir
-        job.start_frame = self.start_spin.value()
-        job.end_frame = self.end_spin.value()
+        if not output_dir:
+            QMessageBox.warning(self, "경고", "출력 폴더를 선택하세요.")
+            return
 
+        # 옵션 수집
         eyes = []
         if self.left_check.isChecked():
             eyes.append("left")
         if self.right_check.isChecked():
             eyes.append("right")
-        job.eyes = eyes
 
-        job.format = "exr" if self.exr_radio.isChecked() else "ppm"
-        job.separate_folders = self.separate_check.isChecked()
+        if len(eyes) == 0:
+            QMessageBox.warning(self, "경고", "최소 하나의 Eye(L 또는 R)를 선택하세요.")
+            return
 
-        # 제출
-        self.farm_manager.submit_job(job)
+        format_type = "exr" if self.exr_radio.isChecked() else "ppm"
+        separate_folders = self.separate_check.isChecked()
+        clip_folder = self.clip_folder_check.isChecked()
+        use_aces = self.aces_check.isChecked()
+        start_frame = self.start_spin.value()
+        end_frame = self.end_spin.value()
 
-        QMessageBox.information(self, "성공", f"작업이 제출되었습니다.\n작업 ID: {job.job_id}")
+        # 각 파일마다 작업 생성
+        submitted_jobs = []
+        from pathlib import Path
+
+        for clip_path in self.selected_files:
+            clip_name = Path(clip_path).stem  # 확장자 제외한 파일명
+
+            # 영상별폴더 옵션에 따라 출력 경로 결정
+            if clip_folder:
+                job_output_dir = str(Path(output_dir) / clip_name)
+            else:
+                job_output_dir = output_dir
+
+            # 작업 생성
+            timestamp = int(time.time() * 1000)  # 밀리초 단위로 고유성 보장
+            job = RenderJob(f"job_{timestamp}_{clip_name}")
+            job.clip_path = clip_path
+            job.output_dir = job_output_dir
+            job.start_frame = start_frame
+            job.end_frame = end_frame
+            job.eyes = eyes
+            job.format = format_type
+            job.separate_folders = separate_folders
+            job.use_aces = use_aces
+            job.color_input_space = settings.color_input_space
+            job.color_output_space = settings.color_output_space
+
+            # 제출
+            self.farm_manager.submit_job(job)
+            submitted_jobs.append(job.job_id)
+            time.sleep(0.01)  # 고유 ID 보장을 위한 작은 딜레이
+
+        # 결과 메시지
+        total = len(submitted_jobs)
+        if clip_folder:
+            output_info = f"각 파일은 '{output_dir}/(파일명)/' 폴더에 렌더링됩니다."
+        else:
+            output_info = f"모든 파일이 '{output_dir}/' 폴더에 렌더링됩니다."
+
+        # 출력 폴더 저장
+        settings.last_output_folder = output_dir
+        settings.save()
+
+        QMessageBox.information(
+            self,
+            "작업 제출 완료",
+            f"{total}개의 작업이 렌더팜에 제출되었습니다.\n\n{output_info}"
+        )
+
+        # 제출 후 파일 목록 초기화 (선택사항)
+        # self.selected_files.clear()
+        # self.file_list_widget.clear()
+        # self.update_file_count()
 
     def start_worker(self):
         """워커 시작"""
@@ -808,10 +1470,10 @@ class FarmUI(QMainWindow):
         """네트워크 상태 업데이트"""
         if connected:
             self.network_status_label.setText("🟢 네트워크: 연결됨")
-            self.network_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.network_status_label.setStyleSheet("color: #66bb6a; font-weight: bold;")
         else:
             self.network_status_label.setText("🔴 네트워크: 끊김 (재연결 중...)")
-            self.network_status_label.setStyleSheet("color: red; font-weight: bold;")
+            self.network_status_label.setStyleSheet("color: #ef5350; font-weight: bold;")
 
     def update_workers_table(self, workers):
         """워커 테이블 업데이트"""
@@ -849,10 +1511,13 @@ class FarmUI(QMainWindow):
             # 영상 이름
             self.workers_table.setItem(i, 5, QTableWidgetItem(worker.current_clip_name if worker.current_clip_name else "-"))
 
-            # 처리 프레임 수
-            processed_item = QTableWidgetItem(str(worker.current_processed) if worker.current_processed > 0 else "-")
-            if worker.current_processed > 0:
+            # 처리 프레임 수 (현재/전체)
+            if worker.current_processed > 0 and worker.current_total_frames > 0:
+                processed_text = f"{worker.current_processed}/{worker.current_total_frames}"
+                processed_item = QTableWidgetItem(processed_text)
                 processed_item.setForeground(QColor(76, 175, 80))  # 녹색
+            else:
+                processed_item = QTableWidgetItem("-")
             self.workers_table.setItem(i, 6, processed_item)
 
             # 에러 수
@@ -910,43 +1575,63 @@ class FarmUI(QMainWindow):
 
     def show_job_context_menu(self, position):
         """작업 목록 컨텍스트 메뉴 표시"""
-        # 선택된 행 확인
-        row = self.jobs_table.rowAt(position.y())
-        if row < 0:
+        # 선택된 행들 확인
+        selected_rows = self.jobs_table.selectionModel().selectedRows()
+        if not selected_rows:
             return
 
-        # 작업 ID 가져오기
-        job_id_item = self.jobs_table.item(row, 0)
-        if not job_id_item:
-            return
+        # 선택된 작업 ID들 수집
+        job_ids = []
+        for index in selected_rows:
+            row = index.row()
+            job_id_item = self.jobs_table.item(row, 0)
+            if job_id_item:
+                job_ids.append(job_id_item.text())
 
-        job_id = job_id_item.text()
+        if not job_ids:
+            return
 
         # 컨텍스트 메뉴 생성
         menu = QMenu(self)
 
-        # 출력 폴더 열기 액션
-        open_folder_action = QAction("📁 출력 폴더 열기", self)
-        open_folder_action.triggered.connect(lambda: self.open_output_folder(job_id))
-        menu.addAction(open_folder_action)
+        # 단일 선택일 때만 출력 폴더 열기
+        if len(job_ids) == 1:
+            open_folder_action = QAction("📁 출력 폴더 열기", self)
+            open_folder_action.triggered.connect(lambda: self.open_output_folder(job_ids[0]))
+            menu.addAction(open_folder_action)
+            menu.addSeparator()
+
+        # 다중 선택 지원 액션들
+        if len(job_ids) == 1:
+            # 리셋 액션
+            reset_action = QAction("🔄 작업 리셋 (진행 상태 초기화)", self)
+            reset_action.triggered.connect(lambda: self.reset_job(job_ids[0]))
+            menu.addAction(reset_action)
+
+            # 완료 표시 액션
+            complete_action = QAction("✅ 완료로 표시", self)
+            complete_action.triggered.connect(lambda: self.mark_job_complete(job_ids[0]))
+            menu.addAction(complete_action)
+        else:
+            # 다중 리셋
+            reset_action = QAction(f"🔄 선택한 {len(job_ids)}개 작업 리셋", self)
+            reset_action.triggered.connect(lambda: self.reset_jobs(job_ids))
+            menu.addAction(reset_action)
+
+            # 다중 완료 표시
+            complete_action = QAction(f"✅ 선택한 {len(job_ids)}개 작업 완료로 표시", self)
+            complete_action.triggered.connect(lambda: self.mark_jobs_complete(job_ids))
+            menu.addAction(complete_action)
 
         menu.addSeparator()
 
-        # 리셋 액션
-        reset_action = QAction("🔄 작업 리셋 (진행 상태 초기화)", self)
-        reset_action.triggered.connect(lambda: self.reset_job(job_id))
-        menu.addAction(reset_action)
-
-        # 완료 표시 액션
-        complete_action = QAction("✅ 완료로 표시", self)
-        complete_action.triggered.connect(lambda: self.mark_job_complete(job_id))
-        menu.addAction(complete_action)
-
-        menu.addSeparator()
-
-        # 삭제 액션
-        delete_action = QAction("🗑️ 작업 삭제", self)
-        delete_action.triggered.connect(lambda: self.delete_job(job_id))
+        # 삭제 액션 (다중 선택 지원)
+        if len(job_ids) == 1:
+            delete_action = QAction("🗑️ 작업 삭제", self)
+            delete_action.triggered.connect(lambda: self.delete_job(job_ids[0]))
+        else:
+            delete_action = QAction(f"🗑️ 선택한 {len(job_ids)}개 작업 삭제", self)
+            delete_action.triggered.connect(lambda: self.delete_jobs(job_ids))
         menu.addAction(delete_action)
 
         # 메뉴 표시
@@ -990,6 +1675,42 @@ class FarmUI(QMainWindow):
         if reply == QMessageBox.Yes:
             self.farm_manager.delete_job(job_id)
             QMessageBox.information(self, "완료", f"작업 '{job_id}'이(가) 삭제되었습니다.")
+
+    def reset_jobs(self, job_ids: list):
+        """여러 작업 리셋"""
+        reply = QMessageBox.question(
+            self, "작업 리셋",
+            f"{len(job_ids)}개의 작업을 리셋하시겠습니까?\n모든 진행 상태가 초기화됩니다.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            for job_id in job_ids:
+                self.farm_manager.reset_job(job_id)
+            QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 리셋되었습니다.")
+
+    def mark_jobs_complete(self, job_ids: list):
+        """여러 작업을 완료로 표시"""
+        reply = QMessageBox.question(
+            self, "완료로 표시",
+            f"{len(job_ids)}개의 작업을 완료로 표시하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            for job_id in job_ids:
+                self.farm_manager.mark_job_complete(job_id)
+            QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 완료로 표시되었습니다.")
+
+    def delete_jobs(self, job_ids: list):
+        """여러 작업 삭제"""
+        reply = QMessageBox.question(
+            self, "작업 삭제",
+            f"{len(job_ids)}개의 작업을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            for job_id in job_ids:
+                self.farm_manager.delete_job(job_id)
+            QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 삭제되었습니다.")
 
     def open_output_folder(self, job_id: str):
         """작업의 출력 폴더 열기"""

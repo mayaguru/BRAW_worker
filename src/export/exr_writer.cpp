@@ -1,5 +1,6 @@
 #include "exr_writer.h"
 
+#include <cmath>
 #include <iostream>
 #include <vector>
 
@@ -9,6 +10,11 @@
 #include <OpenEXR/ImfFrameBuffer.h>
 #include <OpenEXR/ImfOutputFile.h>
 #include <OpenEXR/ImfStandardAttributes.h>
+#endif
+
+#if OCIO_AVAILABLE
+#include <OpenColorIO/OpenColorIO.h>
+namespace OCIO = OCIO_NAMESPACE;
 #endif
 
 namespace braw {
@@ -31,13 +37,28 @@ bool validate_buffer(const FrameBuffer& buffer) {
 
 }  // namespace
 
+// Rec.709 감마 커브 적용 (linear → gamma 2.4)
+static float apply_rec709_gamma(float linear) {
+    if (linear < 0.0f) return 0.0f;
+    if (linear < 0.018f) {
+        return linear * 4.5f;
+    }
+    return 1.099f * std::pow(linear, 0.45f) - 0.099f;
+}
+
 bool write_exr_half_dwaa(const std::filesystem::path& output_path,
                          const FrameBuffer& buffer,
-                         float dwa_compression) {
+                         float dwa_compression,
+                         const std::string& input_colorspace,
+                         const std::string& output_colorspace,
+                         bool apply_gamma) {
 #if !OPENEXR_AVAILABLE
     (void)output_path;
     (void)buffer;
     (void)dwa_compression;
+    (void)input_colorspace;
+    (void)output_colorspace;
+    (void)apply_gamma;
     std::cerr << "OpenEXR 라이브러리가 구성되지 않았습니다.\n";
     return false;
 #else
@@ -47,16 +68,77 @@ bool write_exr_half_dwaa(const std::filesystem::path& output_path,
 
     try {
         const size_t pixel_count = static_cast<size_t>(buffer.width) * static_cast<size_t>(buffer.height);
+
+        // 색공간 변환 (옵션)
+        std::vector<float> transformed_data;
+        const float* source_data = buffer.as_span().data();
+
+        // 색공간 변환 (OCIO 사용)
+#if OCIO_AVAILABLE
+        if (!input_colorspace.empty() && !output_colorspace.empty()) {
+            try {
+                // 외부 config 파일 사용 (절대 경로)
+                const char* config_file = "P:/00-GIGA/BRAW_CLI/studio-config-v2.1.0_aces-v1.3_ocio-v2.1.ocio";
+                std::cout << "[INFO] OCIO config 로드: " << config_file << "\n";
+                auto config = OCIO::Config::CreateFromFile(config_file);
+
+                std::cout << "[INFO] 색공간 변환: " << input_colorspace << " → " << output_colorspace << "\n";
+                auto processor = config->getProcessor(input_colorspace.c_str(), output_colorspace.c_str());
+                auto cpu = processor->getDefaultCPUProcessor();
+
+                // 변환 데이터 준비
+                transformed_data.resize(pixel_count * 3);
+                std::copy(source_data, source_data + pixel_count * 3, transformed_data.begin());
+
+                // OCIO 변환 적용
+                OCIO::PackedImageDesc img(
+                    transformed_data.data(),
+                    static_cast<long>(buffer.width),
+                    static_cast<long>(buffer.height),
+                    OCIO::ChannelOrdering::CHANNEL_ORDERING_RGB,
+                    OCIO::BitDepth::BIT_DEPTH_F32,
+                    sizeof(float),
+                    sizeof(float) * 3,
+                    sizeof(float) * 3 * buffer.width
+                );
+                cpu->apply(img);
+
+                source_data = transformed_data.data();
+                std::cout << "[INFO] 색공간 변환 완료\n";
+            } catch (const std::exception& e) {
+                std::cerr << "[ERROR] OCIO 색공간 변환 실패: " << e.what() << "\n";
+            }
+        }
+#else
+        if (!input_colorspace.empty()) {
+            std::cerr << "[WARNING] OCIO 미설치 - 색공간 변환 불가\n";
+        }
+#endif
+
+        // 뷰포트 감마 적용 (Rec.709)
+        std::vector<float> gamma_data;
+        if (apply_gamma) {
+            const size_t total_floats = pixel_count * 3;
+            gamma_data.reserve(total_floats);
+            gamma_data.resize(total_floats);
+            // 새 버퍼에 감마 적용된 값 복사
+            for (size_t i = 0; i < total_floats; ++i) {
+                gamma_data[i] = apply_rec709_gamma(source_data[i]);
+            }
+            source_data = gamma_data.data();
+            std::cout << "[INFO] Rec.709 감마 커브 적용 완료\n";
+        }
+
+        // float32 → half 변환
         std::vector<Imath::half> channels[3];
         for (auto& ch : channels) {
             ch.resize(pixel_count);
         }
 
-        const auto data = buffer.as_span();
         for (size_t i = 0; i < pixel_count; ++i) {
-            channels[0][i] = Imath::half(data[i * 3 + 0]);
-            channels[1][i] = Imath::half(data[i * 3 + 1]);
-            channels[2][i] = Imath::half(data[i * 3 + 2]);
+            channels[0][i] = Imath::half(source_data[i * 3 + 0]);
+            channels[1][i] = Imath::half(source_data[i * 3 + 1]);
+            channels[2][i] = Imath::half(source_data[i * 3 + 2]);
         }
 
         Imf::Header header(buffer.width, buffer.height);
