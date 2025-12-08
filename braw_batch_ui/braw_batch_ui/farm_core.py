@@ -173,8 +173,8 @@ class FrameClaim:
         claim.claimed_at = datetime.fromisoformat(data["claimed_at"])
         return claim
 
-    def is_expired(self, timeout_seconds=300):
-        """타임아웃 확인 (기본 5분)"""
+    def is_expired(self, timeout_seconds=90):
+        """타임아웃 확인 (기본 90초 - CLI 실행 30초 + 여유)"""
         elapsed = (datetime.now() - self.claimed_at).total_seconds()
         return elapsed > timeout_seconds
 
@@ -283,8 +283,14 @@ class FarmManager:
                     # 타임아웃되지 않았으면 실패
                     if not existing.is_expired():
                         return False
+                    # 만료된 claim 삭제
+                    claim_file.unlink(missing_ok=True)
             except:
-                pass
+                # 읽기 실패 시 삭제 시도
+                try:
+                    claim_file.unlink(missing_ok=True)
+                except:
+                    pass
 
         # 클레임 시도 (x 모드로 atomic)
         try:
@@ -329,6 +335,202 @@ class FarmManager:
             "processing": claimed  # claimed = 현재 처리중
         }
 
+    def is_job_verified(self, job_id: str) -> bool:
+        """작업이 이미 검증 완료되었는지 확인"""
+        verified_file = self.config.completed_dir / f"{job_id}.verified"
+        return verified_file.exists()
+
+    def claim_verification(self, job_id: str) -> bool:
+        """검증 작업 클레임 (한 워커만 검증하도록)"""
+        verifying_file = self.config.completed_dir / f"{job_id}.verifying"
+
+        # 이미 검증 완료됐으면 클레임 필요 없음
+        if self.is_job_verified(job_id):
+            return False
+
+        # atomic 파일 생성으로 클레임
+        try:
+            with open(verifying_file, 'x', encoding='utf-8') as f:
+                json.dump({
+                    "job_id": job_id,
+                    "started_at": datetime.now().isoformat(),
+                    "worker_id": self.worker.worker_id
+                }, f, indent=2)
+            return True
+        except FileExistsError:
+            return False
+
+    def release_verification_claim(self, job_id: str):
+        """검증 클레임 해제"""
+        verifying_file = self.config.completed_dir / f"{job_id}.verifying"
+        try:
+            verifying_file.unlink(missing_ok=True)
+        except:
+            pass
+
+    def is_job_complete(self, job: 'RenderJob') -> bool:
+        """작업의 모든 프레임이 완료됐는지 확인 (.done + 실제 파일 기준)"""
+        for frame_idx in range(job.start_frame, job.end_frame + 1):
+            for eye in job.eyes:
+                if not self.is_frame_really_complete(job, frame_idx, eye):
+                    return False
+        return True
+
+    def mark_job_verified(self, job_id: str, avg_size: float, total_files: int):
+        """작업 검증 완료 표시"""
+        verified_file = self.config.completed_dir / f"{job_id}.verified"
+        with open(verified_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "job_id": job_id,
+                "verified_at": datetime.now().isoformat(),
+                "avg_file_size": avg_size,
+                "total_files": total_files,
+                "verified_by": self.worker.worker_id
+            }, f, indent=2)
+
+    def verify_job_output_files(self, job: 'RenderJob') -> Dict[str, any]:
+        """실제 출력 파일 검증 - 미싱/손상 프레임 탐지 (평균 크기 기반)"""
+
+        # 이미 검증 완료된 작업이면 스킵
+        if self.is_job_verified(job.job_id):
+            total_tasks = job.get_total_tasks()
+            return {
+                "total_expected": total_tasks,
+                "total_existing": total_tasks,
+                "total_missing": 0,
+                "total_corrupted": 0,
+                "avg_file_size": 0,
+                "missing_files": [],
+                "corrupted_files": [],
+                "problem_files": [],
+                "complete": True,
+                "already_verified": True,
+                "progress_percent": 100.0
+            }
+
+        output_dir = Path(job.output_dir)
+        clip_basename = Path(job.clip_path).stem
+        ext = ".exr" if job.format == "exr" else ".ppm"
+
+        # 1차 스캔: 파일 존재 여부와 크기 수집
+        file_info = []
+        missing_files = []
+
+        for frame_idx in range(job.start_frame, job.end_frame + 1):
+            for eye in job.eyes:
+                frame_num = f"{frame_idx:06d}"
+
+                if job.separate_folders:
+                    folder = "L" if eye == "left" else "R"
+                    expected_path = output_dir / folder / f"{clip_basename}_{frame_num}{ext}"
+                else:
+                    suffix = "_L" if eye == "left" else "_R"
+                    expected_path = output_dir / f"{clip_basename}{suffix}_{frame_num}{ext}"
+
+                if expected_path.exists():
+                    file_size = expected_path.stat().st_size
+                    file_info.append({
+                        "path": expected_path,
+                        "frame": frame_idx,
+                        "eye": eye,
+                        "size": file_size
+                    })
+                else:
+                    missing_files.append({
+                        "path": expected_path,
+                        "frame": frame_idx,
+                        "eye": eye,
+                        "reason": "not_found"
+                    })
+
+        # 2차 검사: 평균 크기 계산 및 이상치 탐지
+        corrupted_files = []
+        existing_files = []
+
+        if file_info:
+            # 평균 파일 크기 계산
+            sizes = [f["size"] for f in file_info]
+            avg_size = sum(sizes) / len(sizes)
+            # 평균의 70% 미만이면 손상으로 간주 (30% 이상 작으면)
+            min_acceptable_size = avg_size * 0.7
+
+            for f in file_info:
+                if f["size"] < min_acceptable_size:
+                    corrupted_files.append({
+                        "path": f["path"],
+                        "frame": f["frame"],
+                        "eye": f["eye"],
+                        "size": f["size"],
+                        "avg_size": avg_size,
+                        "reason": "too_small"
+                    })
+                else:
+                    existing_files.append(f["path"])
+        else:
+            avg_size = 0
+
+        # 손상된 파일도 문제 파일로 합산
+        all_problem_files = missing_files + corrupted_files
+        total_expected = len(file_info) + len(missing_files)
+        total_existing = len(existing_files)
+        total_missing = len(missing_files)
+        total_corrupted = len(corrupted_files)
+        is_complete = len(all_problem_files) == 0
+
+        # 검증 완료되면 마커 파일 생성
+        if is_complete and total_expected > 0:
+            self.mark_job_verified(job.job_id, avg_size, total_expected)
+
+        return {
+            "total_expected": total_expected,
+            "total_existing": total_existing,
+            "total_missing": total_missing,
+            "total_corrupted": total_corrupted,
+            "avg_file_size": avg_size,
+            "missing_files": missing_files,
+            "corrupted_files": corrupted_files,
+            "problem_files": all_problem_files,  # 재처리 대상
+            "complete": is_complete,
+            "already_verified": False,
+            "progress_percent": (total_existing / total_expected * 100) if total_expected > 0 else 0
+        }
+
+    def repair_missing_frames(self, job: 'RenderJob') -> int:
+        """미싱/손상 프레임의 .done 파일 삭제하여 재처리 유도"""
+        verify_result = self.verify_job_output_files(job)
+        repaired_count = 0
+
+        # 미싱 + 손상 파일 모두 처리
+        for problem in verify_result["problem_files"]:
+            frame_idx = problem["frame"]
+            eye = problem["eye"]
+
+            # 손상된 파일이면 삭제
+            if problem.get("reason") == "too_small":
+                try:
+                    problem["path"].unlink()
+                except:
+                    pass
+
+            # .done 파일 삭제 (재처리 유도)
+            done_file = self.config.completed_dir / f"{job.job_id}_{frame_idx:06d}_{eye}.done"
+            if done_file.exists():
+                try:
+                    done_file.unlink()
+                    repaired_count += 1
+                except:
+                    pass
+
+            # claim 파일도 삭제 (다시 클레임 가능하게)
+            claim_file = self.config.claims_dir / f"{job.job_id}_{frame_idx:06d}_{eye}.json"
+            if claim_file.exists():
+                try:
+                    claim_file.unlink()
+                except:
+                    pass
+
+        return repaired_count
+
     def cleanup_expired_claims(self):
         """만료된 클레임 정리"""
         for claim_file in self.config.claims_dir.glob("*.json"):
@@ -342,12 +544,44 @@ class FarmManager:
                 # 파일 읽기/삭제 중 에러 무시 (다른 워커가 처리중일 수 있음)
                 pass
 
+    def get_output_file_path(self, job: RenderJob, frame_idx: int, eye: str) -> Path:
+        """출력 파일 경로 계산"""
+        output_dir = Path(job.output_dir)
+        clip_basename = Path(job.clip_path).stem
+        ext = ".exr" if job.format == "exr" else ".ppm"
+
+        if job.separate_folders:
+            folder = "L" if eye == "left" else "R"
+            return output_dir / folder / f"{clip_basename}_{frame_idx:06d}{ext}"
+        else:
+            suffix = "_L" if eye == "left" else "_R"
+            return output_dir / f"{clip_basename}{suffix}_{frame_idx:06d}{ext}"
+
+    def is_frame_really_complete(self, job: RenderJob, frame_idx: int, eye: str) -> bool:
+        """프레임이 진짜 완료됐는지 확인 (.done 파일 + 실제 출력 파일 존재)"""
+        # .done 파일 확인
+        if not self.is_frame_completed(job.job_id, frame_idx, eye):
+            return False
+
+        # 실제 출력 파일 존재 확인
+        output_file = self.get_output_file_path(job, frame_idx, eye)
+        if not output_file.exists():
+            # .done 파일만 있고 실제 파일이 없으면 .done 삭제 (재처리 유도)
+            done_file = self.config.completed_dir / f"{job.job_id}_{frame_idx:06d}_{eye}.done"
+            try:
+                done_file.unlink(missing_ok=True)
+            except:
+                pass
+            return False
+
+        return True
+
     def find_next_frame(self, job: RenderJob) -> Optional[Tuple[int, str]]:
         """다음 처리할 프레임 찾기"""
         for frame_idx in range(job.start_frame, job.end_frame + 1):
             for eye in job.eyes:
-                # 완료되지 않았고 클레임되지 않은 프레임 찾기
-                if not self.is_frame_completed(job.job_id, frame_idx, eye):
+                # 실제로 완료되지 않은 프레임 찾기 (.done + 출력파일 모두 확인)
+                if not self.is_frame_really_complete(job, frame_idx, eye):
                     if self.claim_frame(job.job_id, frame_idx, eye):
                         return (frame_idx, eye)
         return None

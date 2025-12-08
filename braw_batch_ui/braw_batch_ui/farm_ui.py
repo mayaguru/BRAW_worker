@@ -187,10 +187,16 @@ class ColorSpaceDialog(QDialog):
 
     def update_preset_combo(self):
         """프리셋 콤보박스 업데이트"""
+        self.preset_combo.blockSignals(True)  # 시그널 차단 (불필요한 load_preset 호출 방지)
         self.preset_combo.clear()
         self.preset_combo.addItem("(프리셋 선택)")
         for name in settings.color_presets.keys():
             self.preset_combo.addItem(name)
+
+        # 마지막 선택한 프리셋 복원
+        if settings.last_preset and settings.last_preset in settings.color_presets:
+            self.preset_combo.setCurrentText(settings.last_preset)
+        self.preset_combo.blockSignals(False)
 
     def load_preset(self, name):
         """프리셋 로드"""
@@ -205,9 +211,10 @@ class ColorSpaceDialog(QDialog):
         self.input_combo.setCurrentText(input_space)
         self.output_combo.setCurrentText(output_space)
 
-        # settings도 업데이트하고 저장
+        # settings도 업데이트하고 저장 (마지막 선택한 프리셋 포함)
         settings.color_input_space = input_space
         settings.color_output_space = output_space
+        settings.last_preset = name
         settings.save()
         print(f"[INFO] 프리셋 적용: {input_space} → {output_space}")
 
@@ -450,6 +457,9 @@ class WorkerThread(QThread):
 
     def process_job(self, job: RenderJob):
         """작업 처리"""
+        # 만료된 클레임 정리 (배치 시작 전)
+        self.farm_manager.cleanup_expired_claims()
+
         # 현재 작업 통계 초기화
         self.current_job_stats = {"success": 0, "failed": 0, "retried": 0}
 
@@ -480,7 +490,14 @@ class WorkerThread(QThread):
                 tasks.append(result)
 
         if not tasks:
-            # 처리할 프레임이 없으면 idle로 변경 (처리 수는 유지)
+            # 처리할 프레임이 없음 - 작업 완료 여부 확인
+            if self.farm_manager.is_job_complete(job):
+                # 완료된 작업이면 100%로 표시
+                total = job.get_total_tasks()
+                self.progress_signal.emit(total, total)
+                self.farm_manager.worker.current_processed = total
+                self.farm_manager.worker.current_total_frames = total
+                self.log_signal.emit(f"  작업 완료됨 (다른 워커가 처리)")
             self.farm_manager.worker.status = "idle"
             self.farm_manager.update_worker()
             return
@@ -505,15 +522,23 @@ class WorkerThread(QThread):
                 success = future.result()
 
                 if success:
-                    self.farm_manager.mark_completed(job.job_id, frame_idx, eye)
-                    self.farm_manager.worker.frames_completed += 1
-                    self.farm_manager.worker.current_processed += 1
-                    self.current_job_stats["success"] += 1
-                    self.total_success += 1
-                    self.total_processed += 1
-                    self.farm_manager.update_worker()
-                    self.log_signal.emit(f"  ✓ [{frame_idx}] {eye.upper()}")
-                else:
+                    # 최종 확인: 실제 파일이 존재하는지 다시 체크
+                    output_file = self.farm_manager.get_output_file_path(job, frame_idx, eye)
+                    if output_file.exists():
+                        self.farm_manager.mark_completed(job.job_id, frame_idx, eye)
+                        self.farm_manager.worker.frames_completed += 1
+                        self.farm_manager.worker.current_processed += 1
+                        self.current_job_stats["success"] += 1
+                        self.total_success += 1
+                        self.total_processed += 1
+                        self.farm_manager.update_worker()
+                        self.log_signal.emit(f"  ✓ [{frame_idx}] {eye.upper()}")
+                    else:
+                        # 파일이 없으면 실패로 처리 (아래 재시도 로직으로)
+                        success = False
+                        self.log_signal.emit(f"  ⚠️ [{frame_idx}] {eye.upper()} 파일 생성 실패")
+
+                if not success:
                     # 재시도 로직
                     retry_count = retry_tasks[(frame_idx, eye)]
                     if retry_count < 2:  # 최대 2번 재시도
@@ -538,12 +563,67 @@ class WorkerThread(QThread):
                 total = job.get_total_tasks()
                 self.progress_signal.emit(progress["completed"], total)
 
-        # 작업 완료 후 통계 출력
-        self.log_signal.emit(f"\n작업 처리 완료: {job.job_id}")
+        # 배치 처리 완료 통계 출력
+        self.log_signal.emit(f"\n배치 처리 완료: {job.job_id}")
         self.log_signal.emit(f"  ✓ 성공: {self.current_job_stats['success']}")
         self.log_signal.emit(f"  ⟳ 재시도: {self.current_job_stats['retried']}")
         self.log_signal.emit(f"  ✗ 실패: {self.current_job_stats['failed']}")
         self.log_signal.emit(f"  전체 누적 - 성공: {self.total_success}, 실패: {self.total_failed}")
+
+        # 작업이 완전히 끝났는지 확인 (모든 .done 파일 존재 여부)
+        if self.farm_manager.is_job_complete(job):
+            # 진행률 100%로 표시
+            total = job.get_total_tasks()
+            self.progress_signal.emit(total, total)
+            # 워커 처리 수도 전체로 업데이트하고 즉시 반영
+            self.farm_manager.worker.current_processed = total
+            self.farm_manager.worker.current_total_frames = total
+            self.farm_manager.update_worker()  # 완료 상태 즉시 반영
+
+            # 검증 클레임 시도 (한 워커만 검증 수행)
+            if self.farm_manager.claim_verification(job.job_id):
+                self.log_signal.emit(f"\n📁 작업 완료 - 출력 파일 검증 시작...")
+                try:
+                    verify_result = self.farm_manager.verify_job_output_files(job)
+
+                    # 이미 검증 완료된 작업이면 간단히 표시
+                    if verify_result.get('already_verified'):
+                        self.log_signal.emit(f"  이미 검증 완료됨 ✅")
+                    else:
+                        self.log_signal.emit(f"  예상: {verify_result['total_expected']}개")
+                        self.log_signal.emit(f"  정상: {verify_result['total_existing']}개")
+                        self.log_signal.emit(f"  미싱: {verify_result['total_missing']}개")
+                        self.log_signal.emit(f"  손상: {verify_result['total_corrupted']}개")
+                        if verify_result['avg_file_size'] > 0:
+                            avg_mb = verify_result['avg_file_size'] / (1024 * 1024)
+                            self.log_signal.emit(f"  평균 크기: {avg_mb:.1f}MB")
+
+                        total_problems = verify_result['total_missing'] + verify_result['total_corrupted']
+                        if total_problems > 0:
+                            self.log_signal.emit(f"  ⚠️ 문제 프레임 {total_problems}개 발견! 자동 복구 시도...")
+                            # 손상된 파일 번호 출력
+                            for corrupted in verify_result['corrupted_files'][:5]:  # 최대 5개만 표시
+                                size_kb = corrupted['size'] / 1024
+                                avg_kb = corrupted.get('avg_size', 0) / 1024
+                                self.log_signal.emit(f"    - 프레임 {corrupted['frame']} ({corrupted['eye']}): {size_kb:.1f}KB (평균 {avg_kb:.0f}KB의 {size_kb/avg_kb*100:.0f}%)")
+                            if len(verify_result['corrupted_files']) > 5:
+                                self.log_signal.emit(f"    ... 외 {len(verify_result['corrupted_files']) - 5}개")
+                            repaired = self.farm_manager.repair_missing_frames(job)
+                            self.log_signal.emit(f"  🔧 {repaired}개 프레임 재처리 예약됨")
+                        else:
+                            self.log_signal.emit(f"  ✅ 모든 파일 정상 확인 (검증 완료)")
+                finally:
+                    # 검증 클레임 해제
+                    self.farm_manager.release_verification_claim(job.job_id)
+            elif self.farm_manager.is_job_verified(job.job_id):
+                self.log_signal.emit(f"\n📁 작업 완료 - 이미 검증됨 ✅")
+            else:
+                self.log_signal.emit(f"\n📁 작업 완료 - 다른 워커가 검증 중...")
+        else:
+            # 아직 처리할 프레임이 남아있음
+            progress = self.farm_manager.get_job_progress(job.job_id)
+            total = job.get_total_tasks()
+            self.log_signal.emit(f"  진행 중: {progress['completed']}/{total} 완료")
 
         # 작업 완료 후 워커 정보 업데이트 (처리 수는 유지)
         self.farm_manager.worker.status = "idle"

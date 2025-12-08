@@ -24,6 +24,7 @@ class FarmSettings:
         self.color_input_space = "BMDFilm WideGamut Gen5"  # 입력 색공간
         self.color_output_space = "ACEScg"  # 출력 색공간
         self.color_presets = {}  # 색공간 프리셋 저장 {"프리셋이름": {"input": "...", "output": "..."}}
+        self.last_preset = ""  # 마지막 선택한 프리셋
 
         # 설정 파일 경로 (로컬 - 내 문서)
         from pathlib import Path
@@ -52,6 +53,7 @@ class FarmSettings:
                     self.color_input_space = data.get("color_input_space", self.color_input_space)
                     self.color_output_space = data.get("color_output_space", self.color_output_space)
                     self.color_presets = data.get("color_presets", self.color_presets)
+                    self.last_preset = data.get("last_preset", self.last_preset)
             except Exception as e:
                 print(f"설정 로드 실패: {e}")
 
@@ -70,7 +72,8 @@ class FarmSettings:
                 "ocio_config_path": self.ocio_config_path,
                 "color_input_space": self.color_input_space,
                 "color_output_space": self.color_output_space,
-                "color_presets": self.color_presets
+                "color_presets": self.color_presets,
+                "last_preset": self.last_preset
             }
 
             with open(self.config_file, 'w', encoding='utf-8') as f:
