@@ -28,6 +28,8 @@ from config import (
     SUBPROCESS_TIMEOUT_ACES_SEC,
     CLIP_INFO_TIMEOUT_SEC,
     LOG_MAX_LINES,
+    BATCH_FRAME_SIZE,
+    BATCH_CLAIM_TIMEOUT_SEC,
 )
 
 
@@ -491,9 +493,10 @@ class WorkerThread(QThread):
         self.is_running = False
 
     def process_job(self, job: RenderJob):
-        """작업 처리"""
+        """작업 처리 (100프레임 범위 기반 배치)"""
         # 만료된 클레임 정리 (배치 시작 전)
         self.farm_manager.cleanup_expired_claims()
+        self.farm_manager.cleanup_expired_range_claims()
 
         # 현재 작업 통계 초기화
         self.current_job_stats = {"success": 0, "failed": 0, "retried": 0}
@@ -501,6 +504,7 @@ class WorkerThread(QThread):
         self.log_signal.emit(f"\n작업 발견: {job.job_id}")
         self.log_signal.emit(f"  파일: {Path(job.clip_path).name}")
         self.log_signal.emit(f"  범위: {job.start_frame}-{job.end_frame}")
+        self.log_signal.emit(f"  배치 크기: {BATCH_FRAME_SIZE}프레임")
 
         # 워커 상태 및 현재 작업 정보 업데이트
         self.farm_manager.worker.status = "active"
@@ -514,18 +518,18 @@ class WorkerThread(QThread):
         self.farm_manager.worker.current_clip_name = Path(job.clip_path).name
         self.farm_manager.update_worker()
 
-        # 프레임 찾아서 처리
-        tasks = []
+        # 병렬 워커 수만큼 100프레임 범위 찾아서 처리
+        # parallel_workers=10이면 10개 범위(1000프레임)를 동시 처리
+        range_tasks = []
         for _ in range(self.parallel_workers):
             if not self.is_running:
                 break
-
-            result = self.farm_manager.find_next_frame(job)
+            result = self.farm_manager.find_next_frame_range(job, BATCH_FRAME_SIZE)
             if result:
-                tasks.append(result)
+                range_tasks.append(result)
 
-        if not tasks:
-            # 처리할 프레임이 없음 - 작업 완료 여부 확인
+        if not range_tasks:
+            # 처리할 범위가 없음 - 작업 완료 여부 확인
             if self.farm_manager.is_job_complete(job):
                 # 완료된 작업이면 100%로 표시
                 total = job.get_total_tasks()
@@ -537,66 +541,50 @@ class WorkerThread(QThread):
             self.farm_manager.update_worker()
             return
 
-        self.log_signal.emit(f"  {len(tasks)}개 프레임 처리 시작...")
+        total_frames_in_batch = sum(end - start + 1 for start, end, _ in range_tasks)
+        self.log_signal.emit(f"  📦 {len(range_tasks)}개 범위 병렬 처리 시작 (총 {total_frames_in_batch}프레임)")
+        for start_frame, end_frame, eye in range_tasks:
+            self.log_signal.emit(f"    - {start_frame}-{end_frame} ({eye.upper()})")
 
-        # 병렬 처리
+        # 병렬로 여러 범위 동시 처리
         with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
             futures = {}
-            retry_tasks = {}  # 재시도할 작업 추적
-
-            for frame_idx, eye in tasks:
-                future = executor.submit(self.process_frame, job, frame_idx, eye)
-                futures[future] = (frame_idx, eye)
-                retry_tasks[(frame_idx, eye)] = 0  # 재시도 카운트 초기화
+            for start_frame, end_frame, eye in range_tasks:
+                future = executor.submit(self.process_frame_range, job, start_frame, end_frame, eye)
+                futures[future] = (start_frame, end_frame, eye)
 
             for future in as_completed(futures):
                 if not self.is_running:
                     break
 
-                frame_idx, eye = futures[future]
+                start_frame, end_frame, eye = futures[future]
+                frame_count = end_frame - start_frame + 1
 
-                # 예외 처리 추가
                 try:
                     success = future.result()
                 except Exception as e:
-                    self.log_signal.emit(f"  ⚠️ [{frame_idx}] {eye.upper()} 처리 중 예외: {str(e)}")
+                    self.log_signal.emit(f"  ⚠️ [{start_frame}-{end_frame}] {eye.upper()} 예외: {str(e)}")
                     success = False
 
                 if success:
-                    # 파일 존재 확인 + 완료 표시 (원자적으로 처리)
-                    if self.farm_manager.mark_completed_if_file_exists(job, frame_idx, eye):
-                        self.farm_manager.increment_frames_completed()  # 스레드 안전
-                        self.farm_manager.increment_current_processed()  # 스레드 안전
-                        self.current_job_stats["success"] += 1
-                        self.total_success += 1
-                        self.total_processed += 1
-                        self.farm_manager.update_worker()
-                        self.log_signal.emit(f"  ✓ [{frame_idx}] {eye.upper()}")
-                    else:
-                        # 파일이 없으면 실패로 처리 (아래 재시도 로직으로)
-                        success = False
-                        self.log_signal.emit(f"  ⚠️ [{frame_idx}] {eye.upper()} 파일 생성 실패")
-
-                if not success:
-                    # 재시도 로직
-                    retry_count = retry_tasks[(frame_idx, eye)]
-                    max_retries = settings.max_retries
-                    if retry_count < max_retries:
-                        retry_tasks[(frame_idx, eye)] += 1
-                        self.current_job_stats["retried"] += 1
-                        self.log_signal.emit(f"  ⟳ [{frame_idx}] {eye.upper()} 재시도 ({retry_count + 1}/{max_retries})")
-                        # 재시도 작업 제출
-                        new_future = executor.submit(self.process_frame, job, frame_idx, eye)
-                        futures[new_future] = (frame_idx, eye)
-                    else:
-                        # 최종 실패
-                        self.farm_manager.release_claim(job.job_id, frame_idx, eye)
-                        self.farm_manager.increment_total_errors()  # 스레드 안전
-                        self.current_job_stats["failed"] += 1
-                        self.total_failed += 1
-                        self.total_processed += 1
-                        self.farm_manager.update_worker()
-                        self.log_signal.emit(f"  ✗ [{frame_idx}] {eye.upper()} 최종 실패")
+                    # 범위 내 모든 프레임 완료 표시
+                    self.farm_manager.mark_range_completed(job.job_id, start_frame, end_frame, eye)
+                    self.current_job_stats["success"] += frame_count
+                    self.total_success += frame_count
+                    self.total_processed += frame_count
+                    self.farm_manager.worker.frames_completed += frame_count
+                    self.farm_manager.worker.current_processed += frame_count
+                    self.farm_manager.update_worker()
+                    self.log_signal.emit(f"  ✅ 범위 완료: {start_frame}-{end_frame} ({eye.upper()}) - {frame_count}프레임")
+                else:
+                    # 범위 클레임 해제 (재시도 가능하도록)
+                    self.farm_manager.release_range_claim(job.job_id, start_frame, end_frame, eye)
+                    self.farm_manager.increment_total_errors()
+                    self.current_job_stats["failed"] += frame_count
+                    self.total_failed += frame_count
+                    self.total_processed += frame_count
+                    self.farm_manager.update_worker()
+                    self.log_signal.emit(f"  ❌ 범위 실패: {start_frame}-{end_frame} ({eye.upper()})")
 
                 # 진행률 업데이트
                 progress = self.farm_manager.get_job_progress(job.job_id)
@@ -606,7 +594,6 @@ class WorkerThread(QThread):
         # 배치 처리 완료 통계 출력
         self.log_signal.emit(f"\n배치 처리 완료: {job.job_id}")
         self.log_signal.emit(f"  ✓ 성공: {self.current_job_stats['success']}")
-        self.log_signal.emit(f"  ⟳ 재시도: {self.current_job_stats['retried']}")
         self.log_signal.emit(f"  ✗ 실패: {self.current_job_stats['failed']}")
         self.log_signal.emit(f"  전체 누적 - 성공: {self.total_success}, 실패: {self.total_failed}")
 
@@ -727,6 +714,87 @@ class WorkerThread(QThread):
             return False
         except Exception as e:
             print(f"[ERROR] 프레임 처리 오류: {e}")
+            return False
+
+    def process_frame_range(self, job: RenderJob, start_frame: int, end_frame: int, eye: str) -> bool:
+        """프레임 범위 처리 (새 CLI 인터페이스 - 100프레임 배치)
+
+        새 CLI 형식: braw_cli <clip.braw> <output_dir> <start-end> <eye> [options]
+        """
+        clip = Path(job.clip_path)
+        output_dir = Path(job.output_dir)
+
+        # 출력 폴더는 CLI가 자동으로 L/R 하위 폴더 생성
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 새 CLI 명령 구성
+        # braw_cli <clip.braw> <output_dir> <start-end> <eye> [options]
+        cmd = [
+            str(self.cli_path),
+            str(clip),
+            str(output_dir),
+            f"{start_frame}-{end_frame}",
+            eye
+        ]
+
+        # 옵션 추가
+        cmd.append(f"--format={job.format}")
+
+        # 색공간 변환 플래그
+        if job.format == "exr" and job.use_aces:
+            cmd.append("--aces")
+            cmd.append(f"--input-cs={job.color_input_space}")
+            cmd.append(f"--output-cs={job.color_output_space}")
+
+        # CLI는 자동으로 L/R 폴더를 생성함 (eye 모드에 따라)
+
+        # 디버그: 실행 명령 출력
+        print(f"[DEBUG] RANGE CMD: {' '.join(cmd)}")
+        self.log_signal.emit(f"  실행: {' '.join(cmd)}")
+
+        try:
+            # 100프레임 배치는 더 긴 타임아웃 필요
+            # 프레임당 약 3-5초 예상 → 100프레임 = 300~500초
+            frame_count = end_frame - start_frame + 1
+            timeout_sec = max(BATCH_CLAIM_TIMEOUT_SEC, frame_count * 6)  # 프레임당 6초 여유
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=timeout_sec
+            )
+
+            # 결과 로그
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        self.log_signal.emit(f"    {line}")
+
+            if result.returncode != 0:
+                if result.stderr:
+                    self.log_signal.emit(f"  ⚠️ 오류: {result.stderr[:200]}")
+                return False
+
+            # 성공 확인: 출력 파일 중 일부 존재 확인
+            # CLI는 항상 L/R 폴더 구조로 저장
+            clip_basename = clip.stem
+            ext = ".exr" if job.format == "exr" else ".ppm"
+            check_frame = start_frame
+            folder = "L" if eye == "left" else "R"
+            check_file = output_dir / folder / f"{clip_basename}_{check_frame:06d}{ext}"
+
+            return check_file.exists()
+
+        except subprocess.TimeoutExpired:
+            print(f"[TIMEOUT] 범위 처리 타임아웃: {start_frame}-{end_frame}")
+            self.log_signal.emit(f"  ⏰ 타임아웃: {start_frame}-{end_frame}")
+            return False
+        except Exception as e:
+            print(f"[ERROR] 범위 처리 오류: {e}")
+            self.log_signal.emit(f"  ❌ 오류: {str(e)}")
             return False
 
 

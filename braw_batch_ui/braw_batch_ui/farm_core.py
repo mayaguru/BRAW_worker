@@ -30,6 +30,8 @@ from config import (
     FRAME_SEARCH_BATCH_SIZE,
     NFS_WRITE_SYNC_DELAY,
     NFS_READ_RETRY_ON_EMPTY,
+    BATCH_FRAME_SIZE,
+    BATCH_CLAIM_TIMEOUT_SEC,
 )
 
 
@@ -277,6 +279,51 @@ class FrameClaim:
             timeout_seconds = CLAIM_TIMEOUT_SEC
         elapsed = (datetime.now() - self.claimed_at).total_seconds()
         return elapsed > timeout_seconds
+
+
+class RangeClaim:
+    """프레임 범위 클레임 (100프레임 배치 처리용)"""
+    def __init__(self, job_id: str, start_frame: int, end_frame: int, eye: str, worker_id: str):
+        self.job_id = job_id
+        self.start_frame = start_frame
+        self.end_frame = end_frame
+        self.eye = eye
+        self.worker_id = worker_id
+        self.claimed_at = datetime.now()
+
+    def to_dict(self):
+        return {
+            "job_id": self.job_id,
+            "start_frame": self.start_frame,
+            "end_frame": self.end_frame,
+            "eye": self.eye,
+            "worker_id": self.worker_id,
+            "claimed_at": self.claimed_at.isoformat()
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        claim = cls(
+            data["job_id"],
+            data["start_frame"],
+            data["end_frame"],
+            data["eye"],
+            data["worker_id"]
+        )
+        claim.claimed_at = datetime.fromisoformat(data["claimed_at"])
+        return claim
+
+    def is_expired(self, timeout_seconds: int = None):
+        """타임아웃 확인 (100프레임 배치용 - 더 긴 타임아웃)"""
+        if timeout_seconds is None:
+            timeout_seconds = BATCH_CLAIM_TIMEOUT_SEC
+        elapsed = (datetime.now() - self.claimed_at).total_seconds()
+        return elapsed > timeout_seconds
+
+    @property
+    def frame_count(self) -> int:
+        """범위 내 프레임 수"""
+        return self.end_frame - self.start_frame + 1
 
 
 class FarmManager:
@@ -803,6 +850,135 @@ class FarmManager:
                     if self.claim_frame(job.job_id, frame_idx, eye):
                         return (frame_idx, eye)
         return None
+
+    # ===== 100프레임 범위 기반 배치 처리 메서드 =====
+
+    def claim_frame_range(self, job_id: str, start_frame: int, end_frame: int, eye: str) -> bool:
+        """프레임 범위 클레임 시도 (atomic, 100프레임 배치용)"""
+        claim = RangeClaim(job_id, start_frame, end_frame, eye, self.worker.worker_id)
+        claim_file = self.config.claims_dir / f"{job_id}_range_{start_frame:06d}_{end_frame:06d}_{eye}.json"
+        temp_file = self.config.claims_dir / f"{job_id}_range_{start_frame:06d}_{end_frame:06d}_{eye}.{self.worker.worker_id}.tmp"
+
+        # 이미 진행 중인 범위 클레임이 있는지 확인
+        if claim_file.exists():
+            existing_data = safe_json_read(claim_file)
+            if existing_data:
+                try:
+                    existing = RangeClaim.from_dict(existing_data)
+                    if not existing.is_expired():
+                        return False
+                except (KeyError, TypeError):
+                    pass
+
+            # 만료된 클레임 덮어쓰기
+            time.sleep(random.uniform(CLAIM_RANDOM_DELAY_MIN, CLAIM_RANDOM_DELAY_MAX))
+            try:
+                with open(temp_file, 'w', encoding='utf-8') as tf:
+                    json.dump(claim.to_dict(), tf, indent=2)
+                time.sleep(NFS_WRITE_SYNC_DELAY)
+                temp_file.replace(claim_file)
+
+                time.sleep(CLAIM_VERIFY_DELAY)
+                verify_data = safe_json_read(claim_file)
+                if not verify_data or verify_data.get('worker_id') != self.worker.worker_id:
+                    return False
+                return True
+            except (OSError, IOError):
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except:
+                    pass
+                return False
+
+        # 새 클레임 시도
+        try:
+            with open(claim_file, 'x', encoding='utf-8') as f:
+                json.dump(claim.to_dict(), f, indent=2)
+            time.sleep(NFS_WRITE_SYNC_DELAY)
+            time.sleep(CLAIM_VERIFY_DELAY)
+            verify_data = safe_json_read(claim_file)
+            if not verify_data or verify_data.get('worker_id') != self.worker.worker_id:
+                return False
+            return True
+        except FileExistsError:
+            return False
+        except (OSError, IOError):
+            return False
+
+    def release_range_claim(self, job_id: str, start_frame: int, end_frame: int, eye: str):
+        """범위 클레임 해제"""
+        claim_file = self.config.claims_dir / f"{job_id}_range_{start_frame:06d}_{end_frame:06d}_{eye}.json"
+        try:
+            claim_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def mark_range_completed(self, job_id: str, start_frame: int, end_frame: int, eye: str):
+        """범위 내 모든 프레임 완료 표시"""
+        for frame_idx in range(start_frame, end_frame + 1):
+            completed_file = self.config.completed_dir / f"{job_id}_{frame_idx:06d}_{eye}.done"
+            try:
+                with open(completed_file, 'w') as f:
+                    f.write(self.worker.worker_id)
+            except (OSError, IOError):
+                pass
+
+        # 범위 클레임 해제
+        self.release_range_claim(job_id, start_frame, end_frame, eye)
+
+    def find_next_frame_range(self, job: RenderJob, batch_size: int = None) -> Optional[Tuple[int, int, str]]:
+        """다음 처리할 프레임 범위 찾기 (100프레임 배치)
+
+        Returns:
+            (start_frame, end_frame, eye) 또는 None
+        """
+        if batch_size is None:
+            batch_size = BATCH_FRAME_SIZE
+
+        total_frames = job.end_frame - job.start_frame + 1
+
+        # 100프레임 단위로 범위 분할
+        num_batches = (total_frames + batch_size - 1) // batch_size
+
+        # 랜덤 시작점으로 워커들이 분산되도록
+        if FRAME_SEARCH_RANDOM_START and num_batches > 1:
+            start_batch = random.randint(0, num_batches - 1)
+        else:
+            start_batch = 0
+
+        for i in range(num_batches):
+            batch_idx = (start_batch + i) % num_batches
+            range_start = job.start_frame + batch_idx * batch_size
+            range_end = min(range_start + batch_size - 1, job.end_frame)
+
+            for eye in job.eyes:
+                # 이 범위가 이미 완료됐는지 빠르게 체크
+                all_completed = True
+                for frame_idx in range(range_start, range_end + 1):
+                    if not self.is_frame_completed(job.job_id, frame_idx, eye):
+                        all_completed = False
+                        break
+
+                if all_completed:
+                    continue
+
+                # 범위 클레임 시도
+                if self.claim_frame_range(job.job_id, range_start, range_end, eye):
+                    return (range_start, range_end, eye)
+
+        return None
+
+    def cleanup_expired_range_claims(self):
+        """만료된 범위 클레임 정리"""
+        for claim_file in self.config.claims_dir.glob("*_range_*.json"):
+            try:
+                data = safe_json_read(claim_file)
+                if data:
+                    claim = RangeClaim.from_dict(data)
+                    if claim.is_expired():
+                        claim_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def check_network_connection(self) -> bool:
         """네트워크 연결 확인"""

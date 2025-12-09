@@ -44,6 +44,10 @@ CLAIM_VERIFY_DELAY = 0.02  # 클레임 검증 딜레이 (초)
 FRAME_SEARCH_RANDOM_START = True  # 프레임 검색 시 랜덤 시작점 사용
 FRAME_SEARCH_BATCH_SIZE = 50  # 한 번에 검색할 프레임 범위
 
+# 범위 기반 배치 처리 설정 (새 CLI 인터페이스)
+BATCH_FRAME_SIZE = 100  # 한 번에 처리할 프레임 수 (100프레임 단위)
+BATCH_CLAIM_TIMEOUT_SEC = 600  # 배치 클레임 타임아웃 (100프레임 * 3~5초 = 최대 500초 + 여유)
+
 # 네트워크 파일시스템 안정성
 NFS_WRITE_SYNC_DELAY = 0.01  # 쓰기 후 동기화 대기 (초)
 NFS_READ_RETRY_ON_EMPTY = True  # 빈 파일 읽기 시 재시도
