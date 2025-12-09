@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QTabWidget, QProgressBar, QMessageBox, QMenu, QDialog,
                                QListWidget, QListWidgetItem, QComboBox, QInputDialog)
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QUrl
-from PySide6.QtGui import QFont, QColor, QAction, QDesktopServices
+from PySide6.QtGui import QFont, QColor, QAction, QDesktopServices, QIcon
 
 from farm_core import FarmManager, RenderJob, WorkerInfo
 from config import (
@@ -835,7 +835,15 @@ class WorkerThread(QThread):
             clip_basename = clip.stem
             ext = ".exr" if job.format == "exr" else ".ppm"
             check_frame = start_frame
-            folder = "L" if eye == "left" else "R"
+
+            # eye type folder (L/R/SBS)
+            if eye == "left":
+                folder = "L"
+            elif eye == "right":
+                folder = "R"
+            else:  # sbs
+                folder = "SBS"
+
             check_file = output_dir / folder / f"{clip_basename}_{check_frame:06d}{ext}"
 
             return check_file.exists()
@@ -885,6 +893,11 @@ class FarmUI(QMainWindow):
         self.setWindowTitle("BRAW-Brew")
         self.setGeometry(100, 100, 1400, 800)
         self.setMinimumSize(1200, 700)
+
+        # 윈도우 아이콘 설정
+        icon_path = Path(__file__).parent.parent.parent / "icon" / "Braw_Brew.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         # 다크 테마 스타일시트 적용
         self.setStyleSheet("""
