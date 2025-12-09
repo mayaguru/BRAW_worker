@@ -42,6 +42,184 @@ std::filesystem::path build_stereo_path(const std::filesystem::path& base, std::
 
 }  // namespace
 
+// ============================================================================
+// DecodeThread 구현
+// ============================================================================
+
+DecodeThread::DecodeThread(braw::BrawDecoder& decoder, QObject* parent)
+    : QThread(parent), decoder_(decoder) {}
+
+DecodeThread::~DecodeThread() {
+    stop_decoding();
+}
+
+void DecodeThread::start_decoding(uint32_t start_frame, uint32_t frame_count, bool stereo_sbs) {
+    stop_decoding();
+
+    start_frame_ = start_frame;
+    frame_count_ = frame_count;
+    current_decode_frame_ = start_frame;
+    stereo_sbs_ = stereo_sbs;
+    running_ = true;
+
+    clear_buffer();
+    start();
+}
+
+void DecodeThread::stop_decoding() {
+    if (running_) {
+        running_ = false;
+        buffer_not_full_.wakeAll();
+        buffer_not_empty_.wakeAll();
+        wait();
+    }
+}
+
+void DecodeThread::clear_buffer() {
+    QMutexLocker lock(&buffer_mutex_);
+    while (!frame_buffer_.empty()) {
+        frame_buffer_.pop();
+    }
+}
+
+bool DecodeThread::get_next_frame(QImage& out_image, uint32_t& out_frame_index) {
+    QMutexLocker lock(&buffer_mutex_);
+
+    if (frame_buffer_.empty()) {
+        return false;
+    }
+
+    auto& front = frame_buffer_.front();
+    out_frame_index = front.first;
+    out_image = std::move(front.second);
+    frame_buffer_.pop();
+
+    buffer_not_full_.wakeOne();
+    return true;
+}
+
+void DecodeThread::run() {
+    while (running_) {
+        // 버퍼가 가득 찼으면 대기
+        {
+            QMutexLocker lock(&buffer_mutex_);
+            while (running_ && frame_buffer_.size() >= BUFFER_SIZE) {
+                buffer_not_full_.wait(&buffer_mutex_);
+            }
+        }
+
+        if (!running_) break;
+
+        // 프레임 디코딩
+        QImage image = decode_frame_to_image(current_decode_frame_);
+
+        if (!image.isNull()) {
+            QMutexLocker lock(&buffer_mutex_);
+            frame_buffer_.push({current_decode_frame_, std::move(image)});
+            emit frame_ready();
+        }
+
+        // 다음 프레임
+        current_decode_frame_++;
+        if (current_decode_frame_ >= start_frame_ + frame_count_) {
+            current_decode_frame_ = start_frame_;  // 루프
+        }
+    }
+}
+
+QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
+    const uint32_t scale = 4;  // 8K -> 2K 다운샘플링
+
+    auto clamp_to_byte = [](float value) -> unsigned char {
+        float clamped = std::clamp(value, 0.0f, 1.0f);
+        return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
+    };
+
+    if (stereo_sbs_) {
+        // SBS 모드: 양안 디코딩
+        if (!decoder_.decode_frame(frame_index, buffer_left_, braw::StereoView::kLeft)) {
+            return {};
+        }
+        if (!decoder_.decode_frame(frame_index, buffer_right_, braw::StereoView::kRight)) {
+            return {};
+        }
+
+        if (buffer_left_.format != braw::FramePixelFormat::kRGBFloat32 ||
+            buffer_left_.width == 0 || buffer_left_.height == 0) {
+            return {};
+        }
+
+        // SBS 이미지 생성 (좌우 각각 원본 비율 유지, 가로로 나란히)
+        const uint32_t single_width = buffer_left_.width / scale;  // 한쪽 이미지 너비
+        const uint32_t out_width = single_width * 2;               // 전체 SBS 너비 (2배)
+        const uint32_t out_height = buffer_left_.height / scale;
+
+        QImage sbs_image(out_width, out_height, QImage::Format_RGB888);
+        const auto left_data = buffer_left_.as_span();
+        const auto right_data = buffer_right_.as_span();
+
+        for (uint32_t y = 0; y < out_height; ++y) {
+            auto* scan = sbs_image.scanLine(static_cast<int>(y));
+            const uint32_t src_y = y * scale;
+
+            // 좌측: 좌안 (원본 비율)
+            for (uint32_t x = 0; x < single_width; ++x) {
+                const uint32_t src_x = x * scale;
+                const size_t idx = (src_y * buffer_left_.width + src_x) * 3;
+                *scan++ = clamp_to_byte(left_data[idx]);
+                *scan++ = clamp_to_byte(left_data[idx + 1]);
+                *scan++ = clamp_to_byte(left_data[idx + 2]);
+            }
+
+            // 우측: 우안 (원본 비율)
+            for (uint32_t x = 0; x < single_width; ++x) {
+                const uint32_t src_x = x * scale;
+                const size_t idx = (src_y * buffer_right_.width + src_x) * 3;
+                *scan++ = clamp_to_byte(right_data[idx]);
+                *scan++ = clamp_to_byte(right_data[idx + 1]);
+                *scan++ = clamp_to_byte(right_data[idx + 2]);
+            }
+        }
+
+        return sbs_image;
+    } else {
+        // 모노 모드
+        if (!decoder_.decode_frame(frame_index, buffer_left_, braw::StereoView::kLeft)) {
+            return {};
+        }
+
+        if (buffer_left_.format != braw::FramePixelFormat::kRGBFloat32 ||
+            buffer_left_.width == 0 || buffer_left_.height == 0) {
+            return {};
+        }
+
+        const uint32_t out_width = buffer_left_.width / scale;
+        const uint32_t out_height = buffer_left_.height / scale;
+
+        QImage image(out_width, out_height, QImage::Format_RGB888);
+        const auto data = buffer_left_.as_span();
+
+        for (uint32_t y = 0; y < out_height; ++y) {
+            auto* scan = image.scanLine(static_cast<int>(y));
+            const uint32_t src_y = y * scale;
+
+            for (uint32_t x = 0; x < out_width; ++x) {
+                const uint32_t src_x = x * scale;
+                const size_t idx = (src_y * buffer_left_.width + src_x) * 3;
+                *scan++ = clamp_to_byte(data[idx]);
+                *scan++ = clamp_to_byte(data[idx + 1]);
+                *scan++ = clamp_to_byte(data[idx + 2]);
+            }
+        }
+
+        return image;
+    }
+}
+
+// ============================================================================
+// MainWindow 구현
+// ============================================================================
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), decoder_(braw::ComThreadingModel::kMultiThreaded) {
     auto* central = new QWidget(this);
@@ -63,7 +241,7 @@ MainWindow::MainWindow(QWidget* parent)
     stereo_button_ = new QPushButton(tr("SBS"), this);
     stereo_button_->setEnabled(false);
     stereo_button_->setCheckable(true);
-    stereo_button_->setChecked(false);  // 기본값: OFF
+    stereo_button_->setChecked(false);
     controls->addWidget(stereo_button_);
 
     status_label_ = new QLabel(tr("클립이 선택되지 않았습니다."), this);
@@ -103,18 +281,32 @@ MainWindow::MainWindow(QWidget* parent)
     // 타이머 설정
     playback_timer_ = new QTimer(this);
 
+    // 디코딩 스레드 생성
+    decode_thread_ = new DecodeThread(decoder_, this);
+
     // 시그널 연결
     connect(open_button_, &QPushButton::clicked, this, &MainWindow::handle_open_clip);
     connect(play_button_, &QPushButton::clicked, this, &MainWindow::handle_play_pause);
     connect(export_button_, &QPushButton::clicked, this, &MainWindow::handle_export);
     connect(frame_slider_, &QSlider::valueChanged, this, &MainWindow::handle_frame_slider_changed);
     connect(playback_timer_, &QTimer::timeout, this, &MainWindow::handle_playback_timer);
+    connect(decode_thread_, &DecodeThread::frame_ready, this, &MainWindow::handle_frame_decoded, Qt::QueuedConnection);
     connect(stereo_button_, &QPushButton::toggled, this, [this](bool checked) {
         show_stereo_sbs_ = checked;
-        if (has_clip_) {
+        if (decode_thread_) {
+            decode_thread_->set_stereo_mode(checked);
+        }
+        if (has_clip_ && !is_playing_) {
             load_frame(current_frame_);
         }
     });
+}
+
+MainWindow::~MainWindow() {
+    if (decode_thread_) {
+        decode_thread_->stop_decoding();
+        delete decode_thread_;
+    }
 }
 
 void MainWindow::handle_open_clip() {
@@ -124,12 +316,15 @@ void MainWindow::handle_open_clip() {
         return;
     }
 
+    // 기존 디코딩 중지
+    if (decode_thread_) {
+        decode_thread_->stop_decoding();
+    }
+
     const std::filesystem::path clip_path = file.toStdWString();
     if (!decoder_.open_clip(clip_path)) {
         QString error_msg = tr("클립을 열 수 없습니다.\n경로: %1").arg(file);
         QMessageBox::critical(this, tr("오류"), error_msg);
-
-        // 콘솔에도 출력
         qDebug() << "Failed to open clip:" << file;
         qDebug() << "Path exists:" << std::filesystem::exists(clip_path);
         return;
@@ -145,10 +340,9 @@ void MainWindow::handle_open_clip() {
         const int fps = static_cast<int>(info->frame_rate + 0.5);
         playback_timer_->setInterval(1000 / fps);
 
-        // 스테레오 버튼 활성화 (기본값: 좌안만)
         if (info->has_immersive_video && info->available_view_count >= 2) {
             stereo_button_->setEnabled(true);
-            show_stereo_sbs_ = false;  // 초기 로딩은 좌안만
+            show_stereo_sbs_ = false;
             stereo_button_->setChecked(false);
         } else {
             stereo_button_->setEnabled(false);
@@ -159,7 +353,7 @@ void MainWindow::handle_open_clip() {
 
     update_clip_info();
     update_ui_state();
-    load_frame(0);  // 첫 프레임 로드
+    load_frame(0);
     status_label_->setText(tr("%1 을(를) 불러왔습니다.").arg(file));
 }
 
@@ -168,14 +362,23 @@ void MainWindow::handle_play_pause() {
         return;
     }
 
+    const auto info = decoder_.clip_info();
+    if (!info) {
+        return;
+    }
+
     is_playing_ = !is_playing_;
 
     if (is_playing_) {
         play_button_->setText(tr("⏸ 일시정지"));
+
+        // 백그라운드 디코딩 시작
+        decode_thread_->start_decoding(current_frame_, info->frame_count, show_stereo_sbs_);
         playback_timer_->start();
     } else {
         play_button_->setText(tr("▶ 재생"));
         playback_timer_->stop();
+        decode_thread_->stop_decoding();
     }
 }
 
@@ -217,7 +420,7 @@ void MainWindow::handle_export() {
     auto* format_combo = new QComboBox(&dialog);
     format_combo->addItem(tr("PPM (8-bit RGB)"), "ppm");
     format_combo->addItem(tr("EXR (16-bit Half Float, DWAA)"), "exr");
-    format_combo->setCurrentIndex(1);  // 기본값 EXR
+    format_combo->setCurrentIndex(1);
     format_layout->addWidget(format_combo);
     layout->addWidget(format_group);
 
@@ -232,7 +435,7 @@ void MainWindow::handle_export() {
     eye_combo->addItem(tr("우안만"), "right");
     if (has_stereo) {
         eye_combo->addItem(tr("양안 (L, R 폴더)"), "both");
-        eye_combo->setCurrentIndex(2);  // 기본값 양안
+        eye_combo->setCurrentIndex(2);
     }
     stereo_layout->addWidget(eye_combo);
     layout->addWidget(stereo_group);
@@ -263,7 +466,6 @@ void MainWindow::handle_export() {
         return;
     }
 
-    // 출력 폴더 확인
     const QString output_folder = folder_edit->text();
     if (output_folder.isEmpty()) {
         QMessageBox::warning(this, tr("경고"), tr("출력 폴더를 선택하세요."));
@@ -275,7 +477,6 @@ void MainWindow::handle_export() {
         std::filesystem::create_directories(output_dir);
     }
 
-    // 내보내기 설정
     const QString format = format_combo->currentData().toString();
     const QString eye_mode = eye_combo->currentData().toString();
     const QString ext = format == "exr" ? ".exr" : ".ppm";
@@ -287,7 +488,6 @@ void MainWindow::handle_export() {
         return;
     }
 
-    // L, R 폴더 생성 (양안인 경우)
     std::filesystem::path left_dir = output_dir;
     std::filesystem::path right_dir = output_dir;
 
@@ -298,7 +498,6 @@ void MainWindow::handle_export() {
         std::filesystem::create_directories(right_dir);
     }
 
-    // 내보내기 함수
     auto export_frame = [&](uint32_t frame_idx, braw::StereoView view,
                            const std::filesystem::path& out_dir) -> bool {
         braw::FrameBuffer buffer;
@@ -306,7 +505,6 @@ void MainWindow::handle_export() {
             return false;
         }
 
-        // 파일명: frame_0000.exr
         char filename[32];
         snprintf(filename, sizeof(filename), "frame_%04u%s", frame_idx, ext.toStdString().c_str());
         const auto output_path = out_dir / filename;
@@ -318,7 +516,6 @@ void MainWindow::handle_export() {
         }
     };
 
-    // 프로그레스 다이얼로그
     QProgressDialog progress(tr("내보내는 중..."), tr("취소"), in_frame, out_frame, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
@@ -361,23 +558,38 @@ void MainWindow::handle_export() {
 
 void MainWindow::handle_frame_slider_changed(int value) {
     if (is_playing_) {
-        return;  // 재생 중에는 슬라이더 변경 무시
+        return;
     }
     load_frame(static_cast<uint32_t>(value));
 }
 
 void MainWindow::handle_playback_timer() {
-    const auto info = decoder_.clip_info();
-    if (!info) {
+    // 타이머는 프레임 표시 타이밍만 제어
+    // 실제 프레임은 handle_frame_decoded에서 버퍼에서 가져옴
+}
+
+void MainWindow::handle_frame_decoded() {
+    if (!is_playing_) {
         return;
     }
 
-    current_frame_++;
-    if (current_frame_ >= info->frame_count) {
-        current_frame_ = 0;  // 루프
-    }
+    QImage image;
+    uint32_t frame_index;
 
-    load_frame(current_frame_);
+    if (decode_thread_->get_next_frame(image, frame_index)) {
+        current_frame_ = frame_index;
+        last_image_ = image;
+        display_image(image);
+
+        const auto info = decoder_.clip_info();
+        if (info) {
+            frame_label_->setText(tr("%1 / %2").arg(frame_index).arg(info->frame_count - 1));
+        }
+
+        frame_slider_->blockSignals(true);
+        frame_slider_->setValue(static_cast<int>(frame_index));
+        frame_slider_->blockSignals(false);
+    }
 }
 
 void MainWindow::load_frame(uint32_t frame_index) {
@@ -385,7 +597,6 @@ void MainWindow::load_frame(uint32_t frame_index) {
     const bool is_stereo = info && info->has_immersive_video && info->available_view_count >= 2;
 
     if (show_stereo_sbs_ && is_stereo) {
-        // SBS 모드: 양안 디코딩
         if (!decoder_.decode_frame(frame_index, frame_buffer_left_, braw::StereoView::kLeft)) {
             status_label_->setText(tr("좌안 프레임 %1 디코딩 실패").arg(frame_index));
             return;
@@ -403,7 +614,6 @@ void MainWindow::load_frame(uint32_t frame_index) {
 
         last_image_ = sbs_image;
     } else {
-        // 모노 또는 좌안만
         if (!decoder_.decode_frame(frame_index, frame_buffer_left_, braw::StereoView::kLeft)) {
             status_label_->setText(tr("프레임 %1 디코딩 실패").arg(frame_index));
             return;
@@ -425,13 +635,16 @@ void MainWindow::load_frame(uint32_t frame_index) {
         frame_label_->setText(tr("%1 / %2").arg(frame_index).arg(info->frame_count - 1));
     }
 
-    // 이미지 표시 (FastTransformation 사용)
+    display_image(last_image_);
+}
+
+void MainWindow::display_image(const QImage& image) {
     if (image_label_->size().width() > 0 && image_label_->size().height() > 0) {
         image_label_->setPixmap(
-            QPixmap::fromImage(last_image_).scaled(image_label_->size(), Qt::KeepAspectRatio,
-                                                   Qt::FastTransformation));
+            QPixmap::fromImage(image).scaled(image_label_->size(), Qt::KeepAspectRatio,
+                                             Qt::FastTransformation));
     } else {
-        image_label_->setPixmap(QPixmap::fromImage(last_image_));
+        image_label_->setPixmap(QPixmap::fromImage(image));
     }
     image_label_->setText(QString());
 }
@@ -440,7 +653,6 @@ void MainWindow::update_ui_state() {
     play_button_->setEnabled(has_clip_);
     export_button_->setEnabled(has_clip_);
     frame_slider_->setEnabled(has_clip_);
-    // stereo_button_은 open_clip에서 스테레오 여부에 따라 설정됨
 }
 
 void MainWindow::update_clip_info() {
@@ -468,12 +680,12 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
         return {};
     }
 
-    // SBS: 가로로 2배, 각 이미지는 절반 너비로 축소
-    const uint32_t sbs_width = left.width;  // 전체 너비 유지
-    const uint32_t sbs_height = left.height;
-    const uint32_t half_width = left.width / 2;
+    const uint32_t scale = 4;
+    const uint32_t single_width = left.width / scale;   // 한쪽 이미지 너비
+    const uint32_t out_width = single_width * 2;        // 전체 SBS 너비 (2배)
+    const uint32_t out_height = left.height / scale;
 
-    QImage sbs_image(sbs_width, sbs_height, QImage::Format_RGB888);
+    QImage sbs_image(out_width, out_height, QImage::Format_RGB888);
     const auto left_data = left.as_span();
     const auto right_data = right.as_span();
 
@@ -482,22 +694,23 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
         return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
     };
 
-    for (uint32_t y = 0; y < sbs_height; ++y) {
+    for (uint32_t y = 0; y < out_height; ++y) {
         auto* scan = sbs_image.scanLine(static_cast<int>(y));
+        const uint32_t src_y = y * scale;
 
-        // 좌측 절반: 좌안 이미지를 2픽셀당 1픽셀로 샘플링
-        for (uint32_t x = 0; x < half_width; ++x) {
-            const uint32_t src_x = x * 2;  // 2픽셀 간격으로 샘플링
-            const size_t idx = (y * left.width + src_x) * 3;
+        // 좌측: 좌안 (원본 비율)
+        for (uint32_t x = 0; x < single_width; ++x) {
+            const uint32_t src_x = x * scale;
+            const size_t idx = (src_y * left.width + src_x) * 3;
             *scan++ = clamp_to_byte(left_data[idx]);
             *scan++ = clamp_to_byte(left_data[idx + 1]);
             *scan++ = clamp_to_byte(left_data[idx + 2]);
         }
 
-        // 우측 절반: 우안 이미지를 2픽셀당 1픽셀로 샘플링
-        for (uint32_t x = 0; x < half_width; ++x) {
-            const uint32_t src_x = x * 2;
-            const size_t idx = (y * right.width + src_x) * 3;
+        // 우측: 우안 (원본 비율)
+        for (uint32_t x = 0; x < single_width; ++x) {
+            const uint32_t src_x = x * scale;
+            const size_t idx = (src_y * right.width + src_x) * 3;
             *scan++ = clamp_to_byte(right_data[idx]);
             *scan++ = clamp_to_byte(right_data[idx + 1]);
             *scan++ = clamp_to_byte(right_data[idx + 2]);
@@ -513,7 +726,6 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
         return {};
     }
 
-    // 8K는 너무 크므로 1/4 크기로 다운샘플링 (4픽셀당 1픽셀)
     const uint32_t scale = 4;
     const uint32_t out_width = buffer.width / scale;
     const uint32_t out_height = buffer.height / scale;
@@ -547,8 +759,5 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     if (last_image_.isNull()) {
         return;
     }
-    if (image_label_->size().width() > 0 && image_label_->size().height() > 0) {
-        image_label_->setPixmap(QPixmap::fromImage(last_image_).scaled(
-            image_label_->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
-    }
+    display_image(last_image_);
 }

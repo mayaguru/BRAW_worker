@@ -72,7 +72,9 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(git checkout:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(start P:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []
