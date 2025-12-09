@@ -46,46 +46,39 @@ bool STMapWarper::load_stmap(const std::filesystem::path& exr_path) {
             return false;
         }
 
-        // RG 채널만 float32로 직접 읽기 (half-float 손실 방지)
+        // RG 채널을 인터리브 형식으로 직접 읽기 (중간 버퍼 없이)
         stmap_.width = width;
         stmap_.height = height;
         stmap_.data.resize(width * height * 2);
 
-        // 임시 버퍼 (R, G 각각)
-        std::vector<float> r_channel(width * height);
-        std::vector<float> g_channel(width * height);
-
-        // FrameBuffer 설정 - float32로 직접 읽기
+        // FrameBuffer 설정 - 인터리브 버퍼로 직접 읽기
         Imf::FrameBuffer frameBuffer;
+        const size_t pixel_stride = sizeof(float) * 2;  // RG 인터리브
+        const size_t row_stride = width * pixel_stride;
 
-        // R 채널 설정 (stride: sizeof(float), y stride: width * sizeof(float))
+        // 오프셋 계산 (dataWindow 보정)
+        char* base = reinterpret_cast<char*>(stmap_.data.data()) 
+                   - dataWindow.min.x * pixel_stride 
+                   - dataWindow.min.y * row_stride;
+
+        // R 채널 → 인터리브 버퍼의 첫 번째 float
         frameBuffer.insert("R", Imf::Slice(
             Imf::FLOAT,
-            reinterpret_cast<char*>(r_channel.data()) - dataWindow.min.x * sizeof(float) - dataWindow.min.y * width * sizeof(float),
-            sizeof(float),      // xStride
-            width * sizeof(float)  // yStride
+            base,
+            pixel_stride,   // xStride (RG 쌍 단위)
+            row_stride      // yStride
         ));
 
-        // G 채널 설정
+        // G 채널 → 인터리브 버퍼의 두 번째 float
         frameBuffer.insert("G", Imf::Slice(
             Imf::FLOAT,
-            reinterpret_cast<char*>(g_channel.data()) - dataWindow.min.x * sizeof(float) - dataWindow.min.y * width * sizeof(float),
-            sizeof(float),
-            width * sizeof(float)
+            base + sizeof(float),
+            pixel_stride,
+            row_stride
         ));
 
         file.setFrameBuffer(frameBuffer);
         file.readPixels(dataWindow.min.y, dataWindow.max.y);
-
-        // RG를 인터리브 형식으로 저장
-        for (uint32_t y = 0; y < height; ++y) {
-            for (uint32_t x = 0; x < width; ++x) {
-                const size_t src_idx = y * width + x;
-                const size_t dst_idx = src_idx * 2;
-                stmap_.data[dst_idx + 0] = r_channel[src_idx];  // U (S)
-                stmap_.data[dst_idx + 1] = g_channel[src_idx];  // V (T)
-            }
-        }
 
         // 캐시 저장
         save_cache(cache_path);

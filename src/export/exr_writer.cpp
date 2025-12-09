@@ -144,16 +144,12 @@ bool write_exr_half_dwaa(const std::filesystem::path& output_path,
             std::cout << "[INFO] Rec.709 감마 커브 적용 완료\n";
         }
 
-        // float32 → half 변환
-        std::vector<Imath::half> channels[3];
-        for (auto& ch : channels) {
-            ch.resize(pixel_count);
-        }
-
+        // float32 → half 변환 (인터리브 방식으로 메모리 효율화)
+        std::vector<Imath::half> half_data(pixel_count * 3);
         for (size_t i = 0; i < pixel_count; ++i) {
-            channels[0][i] = Imath::half(source_data[i * 3 + 0]);
-            channels[1][i] = Imath::half(source_data[i * 3 + 1]);
-            channels[2][i] = Imath::half(source_data[i * 3 + 2]);
+            half_data[i * 3 + 0] = Imath::half(source_data[i * 3 + 0]);
+            half_data[i * 3 + 1] = Imath::half(source_data[i * 3 + 1]);
+            half_data[i * 3 + 2] = Imath::half(source_data[i * 3 + 2]);
         }
 
         Imf::Header header(buffer.width, buffer.height);
@@ -164,20 +160,21 @@ bool write_exr_half_dwaa(const std::filesystem::path& output_path,
         header.channels().insert("B", Imf::Channel(Imf::HALF));
 
         Imf::FrameBuffer frame_buffer;
-        const size_t xStride = sizeof(Imath::half);
-        const size_t yStride = xStride * buffer.width;
+        const size_t pixel_stride = sizeof(Imath::half) * 3;  // RGB 인터리브
+        const size_t row_stride = pixel_stride * buffer.width;
+        char* base = reinterpret_cast<char*>(half_data.data());
         frame_buffer.insert("R", Imf::Slice(Imf::HALF,
-                                            reinterpret_cast<char*>(channels[0].data()),
-                                            xStride,
-                                            yStride));
+                                            base,
+                                            pixel_stride,
+                                            row_stride));
         frame_buffer.insert("G", Imf::Slice(Imf::HALF,
-                                            reinterpret_cast<char*>(channels[1].data()),
-                                            xStride,
-                                            yStride));
+                                            base + sizeof(Imath::half),
+                                            pixel_stride,
+                                            row_stride));
         frame_buffer.insert("B", Imf::Slice(Imf::HALF,
-                                            reinterpret_cast<char*>(channels[2].data()),
-                                            xStride,
-                                            yStride));
+                                            base + sizeof(Imath::half) * 2,
+                                            pixel_stride,
+                                            row_stride));
 
         Imf::OutputFile file(output_path.string().c_str(), header);
         file.setFrameBuffer(frame_buffer);
