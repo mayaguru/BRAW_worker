@@ -206,6 +206,8 @@ class RenderJob:
         self.use_aces = True  # ACES 색공간 변환 사용 여부
         self.color_input_space = "Linear BMD WideGamut Gen5"  # 입력 색공간
         self.color_output_space = "ACEScg"  # 출력 색공간
+        self.use_stmap = False  # STMAP 왜곡 보정 사용 여부
+        self.stmap_path = ""  # STMAP EXR 파일 경로
         self.created_at = datetime.now()
         self.created_by = socket.gethostname()
 
@@ -222,6 +224,8 @@ class RenderJob:
             "use_aces": self.use_aces,
             "color_input_space": self.color_input_space,
             "color_output_space": self.color_output_space,
+            "use_stmap": self.use_stmap,
+            "stmap_path": self.stmap_path,
             "created_at": self.created_at.isoformat(),
             "created_by": self.created_by
         }
@@ -239,6 +243,8 @@ class RenderJob:
         job.use_aces = data.get("use_aces", True)  # 기본값 True
         job.color_input_space = data.get("color_input_space", "Linear BMD WideGamut Gen5")
         job.color_output_space = data.get("color_output_space", "ACEScg")
+        job.use_stmap = data.get("use_stmap", False)  # 기본값 False
+        job.stmap_path = data.get("stmap_path", "")
         job.created_at = datetime.fromisoformat(data["created_at"])
         job.created_by = data["created_by"]
         return job

@@ -742,6 +742,10 @@ class WorkerThread(QThread):
             cmd.append(f"--input-cs={job.color_input_space}")
             cmd.append(f"--output-cs={job.color_output_space}")
 
+        # STMAP 왜곡 보정 플래그 추가
+        if job.use_stmap and job.stmap_path:
+            cmd.append(f"--stmap={job.stmap_path}")
+
         # 디버그: 실행 명령 출력
         print(f"[DEBUG] CMD: {' '.join(cmd)}")
 
@@ -796,6 +800,10 @@ class WorkerThread(QThread):
             cmd.append("--aces")
             cmd.append(f"--input-cs={job.color_input_space}")
             cmd.append(f"--output-cs={job.color_output_space}")
+
+        # STMAP 왜곡 보정 플래그 추가
+        if job.use_stmap and job.stmap_path:
+            cmd.append(f"--stmap={job.stmap_path}")
 
         # CLI는 자동으로 L/R 폴더를 생성함 (eye 모드에 따라)
 
@@ -1289,6 +1297,31 @@ class FarmUI(QMainWindow):
         options_layout.addStretch()
         layout.addLayout(options_layout)
 
+        # STMAP 옵션 레이아웃 (새 줄)
+        stmap_layout = QHBoxLayout()
+        self.stmap_check = QCheckBox("STMAP")
+        self.stmap_check.setChecked(settings.render_use_stmap)
+        self.stmap_check.setToolTip("STMAP 왜곡 보정 적용\n렌즈 왜곡을 보정하여 1:1 정사각형 출력\n체크: STMAP EXR 파일 경로 필요")
+        self.stmap_check.stateChanged.connect(self.save_render_options)
+        self.stmap_check.stateChanged.connect(self.on_stmap_changed)
+
+        self.stmap_input = QLineEdit()
+        self.stmap_input.setText(settings.stmap_path)
+        self.stmap_input.setPlaceholderText("STMAP EXR 파일 경로...")
+        self.stmap_input.setToolTip("STMAP EXR 파일 경로 (왜곡 보정용)\n예: P:/00-GIGA/BRAW_CLI/STMAP/AVP_STmap_8k.exr")
+        self.stmap_input.setEnabled(settings.render_use_stmap)
+        self.stmap_input.textChanged.connect(self.save_render_options)
+
+        stmap_browse_btn = QPushButton("📁")
+        stmap_browse_btn.setMaximumWidth(40)
+        stmap_browse_btn.setToolTip("STMAP EXR 파일 찾아보기")
+        stmap_browse_btn.clicked.connect(self.browse_stmap)
+
+        stmap_layout.addWidget(self.stmap_check)
+        stmap_layout.addWidget(self.stmap_input)
+        stmap_layout.addWidget(stmap_browse_btn)
+        layout.addLayout(stmap_layout)
+
         # 제출 버튼
         submit_btn = QPushButton("✅ 작업 제출")
         submit_btn.setToolTip("렌더팜에 작업을 제출합니다\n워커들이 자동으로 프레임을 분산 처리합니다")
@@ -1780,14 +1813,25 @@ class FarmUI(QMainWindow):
             QMessageBox.warning(self, "경고", "최소 하나의 Eye(L, R 또는 SBS)를 선택하세요.")
             return
 
+        from pathlib import Path
+
         format_type = "exr" if self.exr_radio.isChecked() else "ppm"
         separate_folders = self.separate_check.isChecked()
         clip_folder = self.clip_folder_check.isChecked()
         use_aces = self.aces_check.isChecked()
+        use_stmap = self.stmap_check.isChecked()
+        stmap_path = self.stmap_input.text() if use_stmap else ""
+
+        # STMAP 파일 검증
+        if use_stmap and not stmap_path:
+            QMessageBox.warning(self, "경고", "STMAP 파일 경로를 입력하세요.")
+            return
+        if use_stmap and not Path(stmap_path).exists():
+            QMessageBox.warning(self, "경고", f"STMAP 파일을 찾을 수 없습니다:\n{stmap_path}")
+            return
 
         # 각 파일마다 작업 생성
         submitted_jobs = []
-        from pathlib import Path
 
         for clip_path in self.selected_files:
             clip_name = Path(clip_path).stem  # 확장자 제외한 파일명
@@ -1819,6 +1863,8 @@ class FarmUI(QMainWindow):
             job.use_aces = use_aces
             job.color_input_space = settings.color_input_space
             job.color_output_space = settings.color_output_space
+            job.use_stmap = use_stmap
+            job.stmap_path = stmap_path
 
             # 제출
             self.farm_manager.submit_job(job)
@@ -1920,7 +1966,24 @@ class FarmUI(QMainWindow):
         settings.render_clip_folder = self.clip_folder_check.isChecked()
         settings.render_separate_lr = self.separate_check.isChecked()
         settings.render_use_aces = self.aces_check.isChecked()
+        settings.render_use_stmap = self.stmap_check.isChecked()
+        settings.stmap_path = self.stmap_input.text()
         settings.save()
+
+    def browse_stmap(self):
+        """STMAP EXR 파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "STMAP EXR 파일 선택", settings.stmap_path or "P:/00-GIGA/BRAW_CLI/STMAP",
+            "EXR Files (*.exr);;모든 파일 (*.*)"
+        )
+        if file_path:
+            self.stmap_input.setText(file_path)
+            settings.stmap_path = file_path
+            settings.save()
+
+    def on_stmap_changed(self, state):
+        """STMAP 체크박스 상태 변경 시"""
+        self.stmap_input.setEnabled(state == Qt.Checked)
 
     def show_color_settings(self):
         """색공간 설정 다이얼로그 표시"""
