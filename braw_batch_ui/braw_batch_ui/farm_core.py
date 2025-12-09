@@ -675,7 +675,10 @@ class FarmManager:
             for eye in job.eyes:
                 frame_num = f"{frame_idx:06d}"
 
-                if job.separate_folders:
+                if eye == "sbs":
+                    # SBS 모드: SBS 폴더에 저장
+                    expected_path = output_dir / "SBS" / f"{clip_basename}_{frame_num}{ext}"
+                elif job.separate_folders:
                     folder = "L" if eye == "left" else "R"
                     expected_path = output_dir / folder / f"{clip_basename}_{frame_num}{ext}"
                 else:

@@ -715,7 +715,11 @@ class WorkerThread(QThread):
         ext = ".exr" if job.format == "exr" else ".ppm"
         frame_num = f"{frame_idx:06d}"
 
-        if job.separate_folders:
+        if eye == "sbs":
+            # SBS 모드: SBS 폴더에 저장
+            (output_dir / "SBS").mkdir(parents=True, exist_ok=True)
+            output_file = output_dir / "SBS" / f"{clip_basename}_{frame_num}{ext}"
+        elif job.separate_folders:
             folder = "L" if eye == "left" else "R"
             (output_dir / folder).mkdir(parents=True, exist_ok=True)
             output_file = output_dir / folder / f"{clip_basename}_{frame_num}{ext}"
@@ -1214,27 +1218,38 @@ class FarmUI(QMainWindow):
         # 옵션 - 한 줄로
         options_layout = QHBoxLayout()
         self.left_check = QCheckBox("L")
-        self.left_check.setChecked(True)
+        self.left_check.setChecked(settings.render_left)
         self.left_check.setToolTip("왼쪽 눈 렌더링 (스테레오 영상)")
+        self.left_check.stateChanged.connect(self.save_render_options)
         self.right_check = QCheckBox("R")
-        self.right_check.setChecked(True)
+        self.right_check.setChecked(settings.render_right)
         self.right_check.setToolTip("오른쪽 눈 렌더링 (스테레오 영상)")
+        self.right_check.stateChanged.connect(self.save_render_options)
+        self.sbs_check = QCheckBox("SBS")
+        self.sbs_check.setChecked(settings.render_sbs)
+        self.sbs_check.setToolTip("Side-by-Side 합성\nL+R을 가로로 합쳐 하나의 이미지로 저장")
+        self.sbs_check.stateChanged.connect(self.save_render_options)
         self.exr_radio = QRadioButton("EXR")
-        self.exr_radio.setChecked(True)
+        self.exr_radio.setChecked(settings.render_format_exr)
         self.exr_radio.setToolTip("OpenEXR 포맷 (32bit float, 고품질)\n대용량, 후반작업에 적합")
+        self.exr_radio.toggled.connect(self.save_render_options)
         self.ppm_radio = QRadioButton("PPM")
+        self.ppm_radio.setChecked(not settings.render_format_exr)
         self.ppm_radio.setToolTip("PPM 포맷 (8bit, 빠른 처리)\n용량 작음, 미리보기/테스트용")
         self.clip_folder_check = QCheckBox("영상별폴더")
-        self.clip_folder_check.setChecked(True)
+        self.clip_folder_check.setChecked(settings.render_clip_folder)
         self.clip_folder_check.setToolTip("각 영상 파일마다 별도 폴더 생성\n체크: 출력폴더/영상이름/ 에 저장\n해제: 출력폴더/ 에 바로 저장")
+        self.clip_folder_check.stateChanged.connect(self.save_render_options)
 
         self.separate_check = QCheckBox("L/R분리")
-        self.separate_check.setChecked(True)  # 폴더분리 기본값을 True로 설정
+        self.separate_check.setChecked(settings.render_separate_lr)
         self.separate_check.setToolTip("L/R 이미지를 별도 폴더에 저장\n체크: L/, R/ 폴더로 분리\n해제: 한 폴더에 _L, _R 접미사로 저장")
+        self.separate_check.stateChanged.connect(self.save_render_options)
 
         self.aces_check = QCheckBox("색변환")
-        self.aces_check.setChecked(True)  # 색공간 변환 기본값 True
+        self.aces_check.setChecked(settings.render_use_aces)
         self.aces_check.setToolTip("OCIO 색공간 변환 적용\n체크: 설정된 입력→출력 색공간 변환\n해제: 원본 색공간 유지")
+        self.aces_check.stateChanged.connect(self.save_render_options)
 
         # 색공간 설정 버튼
         self.color_settings_btn = QPushButton("🎨")
@@ -1248,6 +1263,7 @@ class FarmUI(QMainWindow):
 
         options_layout.addWidget(self.left_check)
         options_layout.addWidget(self.right_check)
+        options_layout.addWidget(self.sbs_check)
         options_layout.addWidget(QLabel("|"))
         options_layout.addWidget(self.exr_radio)
         options_layout.addWidget(self.ppm_radio)
@@ -1700,12 +1716,15 @@ class FarmUI(QMainWindow):
                 self.file_info_label.setText(info_text)
                 self.file_info_label.setStyleSheet("color: #66bb6a; font-weight: bold;")
 
-                # 스테레오가 아니면 Right 체크 해제
+                # 스테레오가 아니면 Right, SBS 체크 해제
                 if info.get("STEREO") != "true":
                     self.right_check.setChecked(False)
                     self.right_check.setEnabled(False)
+                    self.sbs_check.setChecked(False)
+                    self.sbs_check.setEnabled(False)
                 else:
                     self.right_check.setEnabled(True)
+                    self.sbs_check.setEnabled(True)
 
             else:
                 QMessageBox.warning(self, "오류", "파일 정보를 파싱할 수 없습니다.")
@@ -1736,13 +1755,16 @@ class FarmUI(QMainWindow):
 
         # 옵션 수집
         eyes = []
-        if self.left_check.isChecked():
-            eyes.append("left")
-        if self.right_check.isChecked():
-            eyes.append("right")
+        if self.sbs_check.isChecked():
+            eyes.append("sbs")  # SBS 모드 (L+R 합성)
+        else:
+            if self.left_check.isChecked():
+                eyes.append("left")
+            if self.right_check.isChecked():
+                eyes.append("right")
 
         if len(eyes) == 0:
-            QMessageBox.warning(self, "경고", "최소 하나의 Eye(L 또는 R)를 선택하세요.")
+            QMessageBox.warning(self, "경고", "최소 하나의 Eye(L, R 또는 SBS)를 선택하세요.")
             return
 
         format_type = "exr" if self.exr_radio.isChecked() else "ppm"
@@ -1875,6 +1897,17 @@ class FarmUI(QMainWindow):
                 f"CLI 경로: {settings.cli_path}\n"
                 f"병렬 처리: {settings.parallel_workers}"
             )
+
+    def save_render_options(self):
+        """렌더링 옵션을 설정 파일에 저장"""
+        settings.render_left = self.left_check.isChecked()
+        settings.render_right = self.right_check.isChecked()
+        settings.render_sbs = self.sbs_check.isChecked()
+        settings.render_format_exr = self.exr_radio.isChecked()
+        settings.render_clip_folder = self.clip_folder_check.isChecked()
+        settings.render_separate_lr = self.separate_check.isChecked()
+        settings.render_use_aces = self.aces_check.isChecked()
+        settings.save()
 
     def show_color_settings(self):
         """색공간 설정 다이얼로그 표시"""

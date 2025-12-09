@@ -73,6 +73,15 @@ class FarmSettings:
         self.color_presets = {}  # 색공간 프리셋 저장 {"프리셋이름": {"input": "...", "output": "..."}}
         self.last_preset = ""  # 마지막 선택한 프리셋
 
+        # 렌더링 옵션 저장
+        self.render_left = True  # L 체크
+        self.render_right = True  # R 체크
+        self.render_sbs = False  # SBS 체크
+        self.render_format_exr = True  # EXR 포맷 (False면 PPM)
+        self.render_clip_folder = True  # 영상별폴더
+        self.render_separate_lr = True  # L/R분리
+        self.render_use_aces = True  # 색변환
+
         # 설정 파일 경로 (로컬 - 내 문서)
         # Windows: C:\Users\사용자명\Documents\BRAW Farm\config.json
         # 다른 OS: ~/Documents/BRAW Farm/config.json
@@ -100,6 +109,14 @@ class FarmSettings:
                         self.color_output_space = data.get("color_output_space", self.color_output_space)
                         self.color_presets = data.get("color_presets", self.color_presets)
                         self.last_preset = data.get("last_preset", self.last_preset)
+                        # 렌더링 옵션
+                        self.render_left = data.get("render_left", self.render_left)
+                        self.render_right = data.get("render_right", self.render_right)
+                        self.render_sbs = data.get("render_sbs", self.render_sbs)
+                        self.render_format_exr = data.get("render_format_exr", self.render_format_exr)
+                        self.render_clip_folder = data.get("render_clip_folder", self.render_clip_folder)
+                        self.render_separate_lr = data.get("render_separate_lr", self.render_separate_lr)
+                        self.render_use_aces = data.get("render_use_aces", self.render_use_aces)
                 except (json.JSONDecodeError, OSError) as e:
                     print(f"설정 로드 실패: {e}")
 
@@ -121,7 +138,14 @@ class FarmSettings:
                     "color_input_space": self.color_input_space,
                     "color_output_space": self.color_output_space,
                     "color_presets": self.color_presets,
-                    "last_preset": self.last_preset
+                    "last_preset": self.last_preset,
+                    "render_left": self.render_left,
+                    "render_right": self.render_right,
+                    "render_sbs": self.render_sbs,
+                    "render_format_exr": self.render_format_exr,
+                    "render_clip_folder": self.render_clip_folder,
+                    "render_separate_lr": self.render_separate_lr,
+                    "render_use_aces": self.render_use_aces
                 }
 
                 with open(self.config_file, 'w', encoding='utf-8') as f:
