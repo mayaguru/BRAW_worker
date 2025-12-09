@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include "timeline_slider.h"
+#include "image_viewer.h"
 #include <QSpinBox>
 #include <QString>
 #include <QTimer>
@@ -237,13 +238,10 @@ MainWindow::MainWindow(QWidget* parent)
     info_label_->setStyleSheet("color: #a0a0a0; padding: 4px;");
     layout->addWidget(info_label_);
 
-    // 중앙: 이미지 뷰어 (가장 큰 영역)
-    image_label_ = new QLabel(this);
-    image_label_->setAlignment(Qt::AlignCenter);
-    image_label_->setMinimumSize(640, 360);
-    image_label_->setStyleSheet("background-color: #101010; color: #ffffff;");
-    image_label_->setText(tr("BRAW 파일을 드래그하거나 열기 버튼을 클릭하세요"));
-    layout->addWidget(image_label_, 1);
+    // 중앙: 이미지 뷰어 (가장 큰 영역) - 줌/패닝 지원
+    image_viewer_ = new ImageViewer(this);
+    image_viewer_->setMinimumSize(640, 360);
+    layout->addWidget(image_viewer_, 1);
 
     // 하단: 타임라인 슬라이더
     timeline_slider_ = new TimelineSlider(this);
@@ -678,14 +676,7 @@ void MainWindow::load_frame(uint32_t frame_index) {
 }
 
 void MainWindow::display_image(const QImage& image) {
-    if (image_label_->size().width() > 0 && image_label_->size().height() > 0) {
-        image_label_->setPixmap(
-            QPixmap::fromImage(image).scaled(image_label_->size(), Qt::KeepAspectRatio,
-                                             Qt::FastTransformation));
-    } else {
-        image_label_->setPixmap(QPixmap::fromImage(image));
-    }
-    image_label_->setText(QString());
+    image_viewer_->setImage(image);
 }
 
 void MainWindow::update_ui_state() {

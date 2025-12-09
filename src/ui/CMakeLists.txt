@@ -4,6 +4,7 @@ add_executable(braw_viewer
     viewer_main.cpp
     viewer_window.cpp
     timeline_slider.cpp
+    image_viewer.cpp
 )
 
 target_include_directories(braw_viewer

@@ -18,6 +18,7 @@ class QLabel;
 class QPushButton;
 class QTimer;
 class TimelineSlider;
+class ImageViewer;
 class MainWindow;
 
 // 백그라운드 디코딩 스레드
@@ -97,7 +98,7 @@ class MainWindow : public QMainWindow {
     DecodeThread* decode_thread_{nullptr};
 
     QLabel* info_label_{nullptr};
-    QLabel* image_label_{nullptr};
+    ImageViewer* image_viewer_{nullptr};
     QLabel* status_label_{nullptr};
     QPushButton* open_button_{nullptr};
     QPushButton* play_button_{nullptr};
