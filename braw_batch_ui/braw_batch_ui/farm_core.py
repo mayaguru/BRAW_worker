@@ -1038,13 +1038,13 @@ class FarmManager:
             pass
 
     def reset_job(self, job_id: str):
-        """작업 리셋 (클레임 및 완료 정보 초기화)"""
+        """작업 리셋 (클레임 및 완료 정보 초기화, EXR 파일은 유지)"""
         try:
-            # 클레임 삭제
+            # 클레임 삭제 (일반 클레임 + 범위 클레임)
             for claim_file in self.config.claims_dir.glob(f"{job_id}_*.json"):
                 claim_file.unlink(missing_ok=True)
 
-            # 완료 파일 삭제
+            # 완료 파일 삭제 (.done 파일)
             for done_file in self.config.completed_dir.glob(f"{job_id}_*.done"):
                 done_file.unlink(missing_ok=True)
         except Exception as e:

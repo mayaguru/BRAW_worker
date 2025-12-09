@@ -62,7 +62,10 @@
       "Bash(find:*)",
       "Bash(wc:*)",
       "Bash(timeout 120 ./braw_cli.exe:*)",
-      "Bash(timeout 300 ./braw_cli.exe:*)"
+      "Bash(timeout 300 ./braw_cli.exe:*)",
+      "Bash(cmd /c \"dir /b P:\\00-GIGA\\BRAW_CLI\\_Test_projec\\export\\A001_11051030_C001\\L\\*.exr 2>nul | find /c /v \"\"\"\"\")",
+      "Bash(cmd /c \"dir /b P:\\00-GIGA\\BRAW_CLI\\farm\\completed\\*A001_11051030*.done 2>nul | find /c /v \"\"\"\"\")",
+      "Bash(powershell.exe:*)"
     ],
     "deny": [],
     "ask": []

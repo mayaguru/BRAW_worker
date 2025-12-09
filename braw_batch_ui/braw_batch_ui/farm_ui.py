@@ -7,6 +7,7 @@ BRAW Render Farm UI (PySide6)
 import sys
 import subprocess
 import json
+import threading
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -403,18 +404,27 @@ class WorkerThread(QThread):
     progress_signal = Signal(int, int)  # completed, total
     network_status_signal = Signal(bool)  # network connected
 
-    def __init__(self, farm_manager, cli_path, parallel_workers=10):
+    def __init__(self, farm_manager, cli_path, parallel_workers=10, watchdog_mode=True):
         super().__init__()
         self.farm_manager = farm_manager
         self.cli_path = Path(cli_path)
         self.parallel_workers = parallel_workers
+        self.watchdog_mode = watchdog_mode  # watchdog 모드 (새 작업 자동 감지)
         self.is_running = False
+        self.is_stopping = False  # graceful shutdown 플래그
 
         # 작업 통계
         self.total_processed = 0
         self.total_success = 0
         self.total_failed = 0
         self.current_job_stats = {"success": 0, "failed": 0, "retried": 0}
+
+        # 현재 진행 중인 범위 추적 (graceful shutdown용)
+        self.active_ranges = []  # [(job_id, start, end, eye), ...]
+        self.active_ranges_lock = threading.Lock()
+
+        # 대기 상태 로그 제어
+        self._idle_logged = False
 
     def run(self):
         """워커 메인 루프"""
@@ -470,11 +480,25 @@ class WorkerThread(QThread):
                 if incomplete_jobs:
                     # 첫 번째 미완료 작업만 처리 (한 파일 집중)
                     job = incomplete_jobs[0]
+                    self._idle_logged = False  # 작업 시작하면 대기 로그 리셋
                     if self.is_running:
                         self.farm_manager.last_job_id = job.job_id
                         self.process_job(job)
                 else:
-                    time.sleep(5)  # 작업 없으면 5초 대기
+                    # 작업 없음 - watchdog 모드에 따라 처리
+                    if self.watchdog_mode:
+                        if not self._idle_logged:
+                            self.log_signal.emit("🔍 대기 중 - 새 작업 감시 중... (5초마다 확인)")
+                            self.farm_manager.worker.status = "idle"
+                            self.farm_manager.worker.current_job_id = ""
+                            self.farm_manager.worker.current_clip_name = ""
+                            self.farm_manager.update_worker()
+                            self._idle_logged = True
+                        time.sleep(5)  # 5초 대기 후 다시 확인
+                    else:
+                        # watchdog 비활성화 - 종료
+                        self.log_signal.emit("✅ 모든 작업 완료 - 워커 중지 (Watchdog 비활성화)")
+                        self.is_running = False
 
             except (OSError, PermissionError) as e:
                 # 네트워크 오류로 처리
@@ -489,8 +513,18 @@ class WorkerThread(QThread):
         self.log_signal.emit("=== 워커 종료 ===")
 
     def stop(self):
-        """워커 종료"""
+        """워커 종료 (graceful shutdown)"""
+        self.is_stopping = True
         self.is_running = False
+        self.log_signal.emit("⏳ 워커 중지 요청 - 진행 중인 작업 완료 대기 중...")
+
+    def cleanup_active_ranges(self):
+        """중지 시 완료되지 않은 범위 클레임 해제"""
+        with self.active_ranges_lock:
+            for job_id, start, end, eye in self.active_ranges:
+                self.farm_manager.release_range_claim(job_id, start, end, eye)
+                self.log_signal.emit(f"  🔓 클레임 해제: {start}-{end} ({eye})")
+            self.active_ranges.clear()
 
     def process_job(self, job: RenderJob):
         """작업 처리 (100프레임 범위 기반 배치)"""
@@ -546,6 +580,10 @@ class WorkerThread(QThread):
         for start_frame, end_frame, eye in range_tasks:
             self.log_signal.emit(f"    - {start_frame}-{end_frame} ({eye.upper()})")
 
+        # 활성 범위 등록 (graceful shutdown용)
+        with self.active_ranges_lock:
+            self.active_ranges = [(job.job_id, s, e, ey) for s, e, ey in range_tasks]
+
         # 병렬로 여러 범위 동시 처리
         with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
             futures = {}
@@ -554,9 +592,6 @@ class WorkerThread(QThread):
                 futures[future] = (start_frame, end_frame, eye)
 
             for future in as_completed(futures):
-                if not self.is_running:
-                    break
-
                 start_frame, end_frame, eye = futures[future]
                 frame_count = end_frame - start_frame + 1
 
@@ -565,6 +600,13 @@ class WorkerThread(QThread):
                 except Exception as e:
                     self.log_signal.emit(f"  ⚠️ [{start_frame}-{end_frame}] {eye.upper()} 예외: {str(e)}")
                     success = False
+
+                # 활성 범위에서 제거
+                with self.active_ranges_lock:
+                    try:
+                        self.active_ranges.remove((job.job_id, start_frame, end_frame, eye))
+                    except ValueError:
+                        pass
 
                 if success:
                     # 범위 내 모든 프레임 완료 표시
@@ -753,10 +795,10 @@ class WorkerThread(QThread):
         self.log_signal.emit(f"  실행: {' '.join(cmd)}")
 
         try:
-            # 100프레임 배치는 더 긴 타임아웃 필요
-            # 프레임당 약 3-5초 예상 → 100프레임 = 300~500초
+            # 배치 처리 타임아웃
+            # 12워커 동시 실행 시 I/O 경쟁으로 느려짐 → 프레임당 15초 여유
             frame_count = end_frame - start_frame + 1
-            timeout_sec = max(BATCH_CLAIM_TIMEOUT_SEC, frame_count * 6)  # 프레임당 6초 여유
+            timeout_sec = max(BATCH_CLAIM_TIMEOUT_SEC, frame_count * 15)  # 프레임당 15초 여유
 
             result = subprocess.run(
                 cmd,
@@ -1265,6 +1307,13 @@ class FarmUI(QMainWindow):
         settings_layout.addStretch()
         layout.addLayout(settings_layout)
 
+        # Watchdog 모드 체크박스
+        self.watchdog_checkbox = QCheckBox("🔍 Watchdog 모드 (새 작업 자동 감지)")
+        self.watchdog_checkbox.setChecked(True)  # 기본값: 활성화
+        self.watchdog_checkbox.setToolTip("활성화 시: 작업 완료 후 새 작업을 자동으로 감지하여 처리\n비활성화 시: 현재 작업만 처리 후 대기")
+        self.watchdog_checkbox.setStyleSheet("color: #14a1a8;")
+        layout.addWidget(self.watchdog_checkbox)
+
         # 시작/중지 버튼
         btn_layout = QHBoxLayout()
         self.start_worker_btn = QPushButton("▶️ 시작")
@@ -1762,24 +1811,41 @@ class FarmUI(QMainWindow):
         self.farm_manager.start()
 
         parallel = self.parallel_spin.value()
-        self.worker_thread = WorkerThread(self.farm_manager, self.cli_path, parallel)
+        watchdog = self.watchdog_checkbox.isChecked()
+        self.worker_thread = WorkerThread(self.farm_manager, self.cli_path, parallel, watchdog)
         self.worker_thread.log_signal.connect(self.append_worker_log)
         self.worker_thread.progress_signal.connect(self.update_progress)
         self.worker_thread.network_status_signal.connect(self.update_network_status)
         self.worker_thread.start()
 
+        if watchdog:
+            self.append_worker_log("🔍 Watchdog 모드 활성화 - 새 작업 자동 감지")
+        else:
+            self.append_worker_log("⚡ 단일 실행 모드 - 현재 작업만 처리 후 중지")
+
         self.start_worker_btn.setEnabled(False)
         self.stop_worker_btn.setEnabled(True)
 
     def stop_worker(self):
-        """워커 중지"""
+        """워커 중지 (graceful shutdown)"""
         if self.worker_thread:
             self.worker_thread.stop()
-            self.worker_thread.wait()
+            self.append_worker_log("⏳ 워커 중지 요청 - 진행 중인 작업 완료 대기 중...")
+            self.stop_worker_btn.setEnabled(False)
+            self.stop_worker_btn.setText("⏳ 중지 중...")
+
+            # 최대 60초 대기 (진행 중인 배치 완료)
+            if not self.worker_thread.wait(60000):
+                self.append_worker_log("⚠️ 타임아웃 - 남은 클레임 해제 중...")
+                self.worker_thread.cleanup_active_ranges()
+                self.worker_thread.wait(5000)
+
+            self.append_worker_log("✅ 워커가 안전하게 중지되었습니다.")
 
         self.farm_manager.stop()
 
         self.start_worker_btn.setEnabled(True)
+        self.stop_worker_btn.setText("⏹️ 중지")
         self.stop_worker_btn.setEnabled(False)
 
     def show_settings(self):
@@ -2035,7 +2101,7 @@ class FarmUI(QMainWindow):
 
                 # 테이블 업데이트
                 self.jobs_table.setItem(row, 3, QTableWidgetItem(f"{new_start}-{new_end}"))
-                self.add_log(f"📝 작업 '{job_id}' 프레임 범위 수정: {new_start}-{new_end}")
+                self.append_worker_log(f"📝 작업 '{job_id}' 프레임 범위 수정: {new_start}-{new_end}")
             except Exception as e:
                 QMessageBox.warning(self, "오류", f"작업 저장 실패: {e}")
 
@@ -2108,7 +2174,8 @@ class FarmUI(QMainWindow):
         reply = QMessageBox.question(
             self, "작업 리셋",
             f"작업 '{job_id}'의 진행 상태를 초기화하시겠습니까?\n"
-            "모든 완료 및 클레임 정보가 삭제되고 처음부터 다시 시작됩니다.",
+            "클레임 파일과 .done 파일이 삭제되고 처음부터 다시 시작됩니다.\n"
+            "(출력된 EXR 파일은 유지됩니다)",
             QMessageBox.Yes | QMessageBox.No
         )
 
@@ -2201,13 +2268,22 @@ class FarmUI(QMainWindow):
             QMessageBox.warning(self, "오류", f"폴더를 열 수 없습니다:\n{str(e)}")
 
     def closeEvent(self, event):
-        """창 닫기 이벤트"""
+        """창 닫기 이벤트 (graceful shutdown)"""
+        if self.worker_thread and self.worker_thread.isRunning():
+            # 워커 중지 요청
+            self.worker_thread.stop()
+            self.append_worker_log("⏳ 진행 중인 작업 완료 대기 중...")
+
+            # 최대 30초 대기 (진행 중인 작업 완료)
+            if not self.worker_thread.wait(30000):
+                self.append_worker_log("⚠️ 타임아웃 - 남은 클레임 해제 중...")
+                self.worker_thread.cleanup_active_ranges()
+                self.worker_thread.wait(5000)
+
         if self.status_thread:
             self.status_thread.stop()
             self.status_thread.wait()
-        if self.worker_thread:
-            self.worker_thread.stop()
-            self.worker_thread.wait()
+
         event.accept()
 
 
