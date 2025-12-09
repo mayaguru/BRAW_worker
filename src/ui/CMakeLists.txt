@@ -3,6 +3,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 add_executable(braw_viewer
     viewer_main.cpp
     viewer_window.cpp
+    timeline_slider.cpp
 )
 
 target_include_directories(braw_viewer

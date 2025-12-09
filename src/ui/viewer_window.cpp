@@ -16,7 +16,7 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QSlider>
+#include "timeline_slider.h"
 #include <QSpinBox>
 #include <QString>
 #include <QTimer>
@@ -53,13 +53,13 @@ DecodeThread::~DecodeThread() {
     stop_decoding();
 }
 
-void DecodeThread::start_decoding(uint32_t start_frame, uint32_t frame_count, bool stereo_sbs) {
+void DecodeThread::start_decoding(uint32_t start_frame, uint32_t frame_count, int stereo_view) {
     stop_decoding();
 
     start_frame_ = start_frame;
     frame_count_ = frame_count;
     current_decode_frame_ = start_frame;
-    stereo_sbs_ = stereo_sbs;
+    stereo_view_ = stereo_view;
     running_ = true;
 
     clear_buffer();
@@ -135,7 +135,9 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
         return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
     };
 
-    if (stereo_sbs_) {
+    const int view = stereo_view_.load();
+
+    if (view == 2) {
         // SBS 모드: 양안 디코딩
         if (!decoder_.decode_frame(frame_index, buffer_left_, braw::StereoView::kLeft)) {
             return {};
@@ -183,8 +185,11 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
 
         return sbs_image;
     } else {
-        // 모노 모드
-        if (!decoder_.decode_frame(frame_index, buffer_left_, braw::StereoView::kLeft)) {
+        // 단안 모드: 좌안(0) 또는 우안(1)
+        const braw::StereoView stereo_eye = (view == 1) ?
+            braw::StereoView::kRight : braw::StereoView::kLeft;
+
+        if (!decoder_.decode_frame(frame_index, buffer_left_, stereo_eye)) {
             return {};
         }
 
@@ -224,60 +229,80 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), decoder_(braw::ComThreadingModel::kMultiThreaded) {
     auto* central = new QWidget(this);
     auto* layout = new QVBoxLayout(central);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(6);
 
-    // 상단 컨트롤
+    // 상단: 클립 정보
+    info_label_ = new QLabel(tr("정보 없음"), this);
+    info_label_->setStyleSheet("color: #a0a0a0; padding: 4px;");
+    layout->addWidget(info_label_);
+
+    // 중앙: 이미지 뷰어 (가장 큰 영역)
+    image_label_ = new QLabel(this);
+    image_label_->setAlignment(Qt::AlignCenter);
+    image_label_->setMinimumSize(640, 360);
+    image_label_->setStyleSheet("background-color: #101010; color: #ffffff;");
+    image_label_->setText(tr("BRAW 파일을 드래그하거나 열기 버튼을 클릭하세요"));
+    layout->addWidget(image_label_, 1);
+
+    // 하단: 타임라인 슬라이더
+    timeline_slider_ = new TimelineSlider(this);
+    timeline_slider_->setEnabled(false);
+    layout->addWidget(timeline_slider_);
+
+    // 하단: 컨트롤 버튼들
     auto* controls = new QHBoxLayout();
-    open_button_ = new QPushButton(tr("BRAW 열기"), this);
+    controls->setSpacing(8);
+
+    open_button_ = new QPushButton(tr("열기"), this);
+    open_button_->setToolTip(tr("BRAW 파일 열기"));
     controls->addWidget(open_button_);
 
-    play_button_ = new QPushButton(tr("▶ 재생"), this);
+    play_button_ = new QPushButton(tr("재생 [S]"), this);
     play_button_->setEnabled(false);
+    play_button_->setToolTip(tr("재생/일시정지 (S)"));
     controls->addWidget(play_button_);
+
+    controls->addSpacing(20);
+
+    // 스테레오 뷰 버튼들
+    left_button_ = new QPushButton(tr("좌 [Z]"), this);
+    left_button_->setEnabled(false);
+    left_button_->setCheckable(true);
+    left_button_->setChecked(true);
+    left_button_->setToolTip(tr("좌안 보기 (Z)"));
+    controls->addWidget(left_button_);
+
+    right_button_ = new QPushButton(tr("우 [C]"), this);
+    right_button_->setEnabled(false);
+    right_button_->setCheckable(true);
+    right_button_->setToolTip(tr("우안 보기 (C)"));
+    controls->addWidget(right_button_);
+
+    sbs_button_ = new QPushButton(tr("SBS [X]"), this);
+    sbs_button_->setEnabled(false);
+    sbs_button_->setCheckable(true);
+    sbs_button_->setToolTip(tr("좌우 동시 보기 (X)"));
+    controls->addWidget(sbs_button_);
+
+    controls->addSpacing(20);
 
     export_button_ = new QPushButton(tr("내보내기"), this);
     export_button_->setEnabled(false);
     controls->addWidget(export_button_);
 
-    stereo_button_ = new QPushButton(tr("SBS"), this);
-    stereo_button_->setEnabled(false);
-    stereo_button_->setCheckable(true);
-    stereo_button_->setChecked(false);
-    controls->addWidget(stereo_button_);
+    controls->addStretch(1);
 
     status_label_ = new QLabel(tr("클립이 선택되지 않았습니다."), this);
-    controls->addWidget(status_label_, 1);
-    controls->setSpacing(12);
+    status_label_->setStyleSheet("color: #808080;");
+    controls->addWidget(status_label_);
+
     layout->addLayout(controls);
 
-    // 프레임 슬라이더
-    auto* slider_layout = new QHBoxLayout();
-    frame_slider_ = new QSlider(Qt::Horizontal, this);
-    frame_slider_->setEnabled(false);
-    frame_slider_->setMinimum(0);
-    frame_slider_->setMaximum(0);
-    slider_layout->addWidget(frame_slider_, 1);
-
-    frame_label_ = new QLabel(tr("0 / 0"), this);
-    frame_label_->setMinimumWidth(80);
-    slider_layout->addWidget(frame_label_);
-    layout->addLayout(slider_layout);
-
-    // 클립 정보
-    info_label_ = new QLabel(tr("정보 없음"), this);
-    layout->addWidget(info_label_);
-
-    // 이미지 뷰어
-    image_label_ = new QLabel(this);
-    image_label_->setAlignment(Qt::AlignCenter);
-    image_label_->setMinimumSize(640, 360);
-    image_label_->setStyleSheet("background-color: #101010; color: #ffffff;");
-    image_label_->setText(tr("미리보기 없음"));
-    layout->addWidget(image_label_, 1);
-
     setCentralWidget(central);
-    setWindowTitle(tr("BRAW Viewer"));
+    setWindowTitle(tr("AMAZE Blackmagic BRAW Player"));
     resize(1280, 800);
-    setAcceptDrops(true);  // 드래그 앤 드롭 활성화
+    setAcceptDrops(true);
 
     // 타이머 설정
     playback_timer_ = new QTimer(this);
@@ -289,18 +314,24 @@ MainWindow::MainWindow(QWidget* parent)
     connect(open_button_, &QPushButton::clicked, this, &MainWindow::handle_open_clip);
     connect(play_button_, &QPushButton::clicked, this, &MainWindow::handle_play_pause);
     connect(export_button_, &QPushButton::clicked, this, &MainWindow::handle_export);
-    connect(frame_slider_, &QSlider::valueChanged, this, &MainWindow::handle_frame_slider_changed);
-    connect(playback_timer_, &QTimer::timeout, this, &MainWindow::handle_playback_timer);
-    connect(decode_thread_, &DecodeThread::frame_ready, this, &MainWindow::handle_frame_decoded, Qt::QueuedConnection);
-    connect(stereo_button_, &QPushButton::toggled, this, [this](bool checked) {
-        show_stereo_sbs_ = checked;
-        if (decode_thread_) {
-            decode_thread_->set_stereo_mode(checked);
-        }
-        if (has_clip_ && !is_playing_) {
-            load_frame(current_frame_);
+    connect(timeline_slider_, &TimelineSlider::valueChanged, this, &MainWindow::handle_frame_slider_changed);
+    connect(timeline_slider_, &TimelineSlider::sliderPressed, this, [this]() {
+        if (is_playing_) {
+            playback_timer_->stop();
         }
     });
+    connect(timeline_slider_, &TimelineSlider::sliderReleased, this, [this]() {
+        if (is_playing_) {
+            playback_timer_->start();
+        }
+    });
+    connect(playback_timer_, &QTimer::timeout, this, &MainWindow::handle_playback_timer);
+    connect(decode_thread_, &DecodeThread::frame_ready, this, &MainWindow::handle_frame_decoded, Qt::QueuedConnection);
+
+    // 스테레오 뷰 버튼 연결
+    connect(left_button_, &QPushButton::clicked, this, [this]() { set_stereo_view(0); });
+    connect(right_button_, &QPushButton::clicked, this, [this]() { set_stereo_view(1); });
+    connect(sbs_button_, &QPushButton::clicked, this, [this]() { set_stereo_view(2); });
 }
 
 MainWindow::~MainWindow() {
@@ -329,7 +360,7 @@ void MainWindow::open_braw_file(const QString& file) {
     if (is_playing_) {
         is_playing_ = false;
         playback_timer_->stop();
-        play_button_->setText(tr("▶ 재생"));
+        play_button_->setText(tr("재생 [S]"));
     }
 
     const std::filesystem::path clip_path = file.toStdWString();
@@ -347,19 +378,20 @@ void MainWindow::open_braw_file(const QString& file) {
 
     const auto info = decoder_.clip_info();
     if (info) {
-        frame_slider_->setMaximum(static_cast<int>(info->frame_count - 1));
+        timeline_slider_->setRange(static_cast<int>(info->frame_count));
+        timeline_slider_->setFrameRate(info->frame_rate);
         const int fps = static_cast<int>(info->frame_rate + 0.5);
         playback_timer_->setInterval(1000 / fps);
 
-        if (info->has_immersive_video && info->available_view_count >= 2) {
-            stereo_button_->setEnabled(true);
-            show_stereo_sbs_ = false;
-            stereo_button_->setChecked(false);
-        } else {
-            stereo_button_->setEnabled(false);
-            show_stereo_sbs_ = false;
-            stereo_button_->setChecked(false);
-        }
+        // 스테레오 버튼 활성화
+        const bool has_stereo = info->has_immersive_video && info->available_view_count >= 2;
+        left_button_->setEnabled(has_stereo);
+        right_button_->setEnabled(has_stereo);
+        sbs_button_->setEnabled(has_stereo);
+
+        // 기본값: 좌안
+        stereo_view_ = 0;
+        set_stereo_view(0);
     }
 
     update_clip_info();
@@ -381,13 +413,13 @@ void MainWindow::handle_play_pause() {
     is_playing_ = !is_playing_;
 
     if (is_playing_) {
-        play_button_->setText(tr("⏸ 일시정지"));
+        play_button_->setText(tr("일시정지 [S]"));
 
         // 백그라운드 디코딩 시작
-        decode_thread_->start_decoding(current_frame_, info->frame_count, show_stereo_sbs_);
+        decode_thread_->start_decoding(current_frame_, info->frame_count, stereo_view_);
         playback_timer_->start();
     } else {
-        play_button_->setText(tr("▶ 재생"));
+        play_button_->setText(tr("재생 [S]"));
         playback_timer_->stop();
         decode_thread_->stop_decoding();
     }
@@ -592,14 +624,9 @@ void MainWindow::handle_frame_decoded() {
         last_image_ = image;
         display_image(image);
 
-        const auto info = decoder_.clip_info();
-        if (info) {
-            frame_label_->setText(tr("%1 / %2").arg(frame_index).arg(info->frame_count - 1));
-        }
-
-        frame_slider_->blockSignals(true);
-        frame_slider_->setValue(static_cast<int>(frame_index));
-        frame_slider_->blockSignals(false);
+        timeline_slider_->blockSignals(true);
+        timeline_slider_->setValue(static_cast<int>(frame_index));
+        timeline_slider_->blockSignals(false);
     }
 }
 
@@ -607,7 +634,8 @@ void MainWindow::load_frame(uint32_t frame_index) {
     const auto info = decoder_.clip_info();
     const bool is_stereo = info && info->has_immersive_video && info->available_view_count >= 2;
 
-    if (show_stereo_sbs_ && is_stereo) {
+    if (stereo_view_ == 2 && is_stereo) {
+        // SBS 모드: 양안
         if (!decoder_.decode_frame(frame_index, frame_buffer_left_, braw::StereoView::kLeft)) {
             status_label_->setText(tr("좌안 프레임 %1 디코딩 실패").arg(frame_index));
             return;
@@ -625,7 +653,11 @@ void MainWindow::load_frame(uint32_t frame_index) {
 
         last_image_ = sbs_image;
     } else {
-        if (!decoder_.decode_frame(frame_index, frame_buffer_left_, braw::StereoView::kLeft)) {
+        // 단안 모드: 좌안(0) 또는 우안(1)
+        const braw::StereoView view = (stereo_view_ == 1 && is_stereo) ?
+            braw::StereoView::kRight : braw::StereoView::kLeft;
+
+        if (!decoder_.decode_frame(frame_index, frame_buffer_left_, view)) {
             status_label_->setText(tr("프레임 %1 디코딩 실패").arg(frame_index));
             return;
         }
@@ -638,13 +670,9 @@ void MainWindow::load_frame(uint32_t frame_index) {
     }
 
     current_frame_ = frame_index;
-    frame_slider_->blockSignals(true);
-    frame_slider_->setValue(static_cast<int>(frame_index));
-    frame_slider_->blockSignals(false);
-
-    if (info) {
-        frame_label_->setText(tr("%1 / %2").arg(frame_index).arg(info->frame_count - 1));
-    }
+    timeline_slider_->blockSignals(true);
+    timeline_slider_->setValue(static_cast<int>(frame_index));
+    timeline_slider_->blockSignals(false);
 
     display_image(last_image_);
 }
@@ -663,7 +691,7 @@ void MainWindow::display_image(const QImage& image) {
 void MainWindow::update_ui_state() {
     play_button_->setEnabled(has_clip_);
     export_button_->setEnabled(has_clip_);
-    frame_slider_->setEnabled(has_clip_);
+    timeline_slider_->setEnabled(has_clip_);
 }
 
 void MainWindow::update_clip_info() {
@@ -804,4 +832,84 @@ void MainWindow::dropEvent(QDropEvent* event) {
         }
     }
     event->ignore();
+}
+
+void MainWindow::set_stereo_view(int view) {
+    if (stereo_view_ == view) {
+        return;
+    }
+
+    stereo_view_ = view;
+
+    // 버튼 상태 업데이트
+    left_button_->setChecked(view == 0);
+    right_button_->setChecked(view == 1);
+    sbs_button_->setChecked(view == 2);
+
+    // 재생 중이면 디코드 스레드 모드 변경
+    if (is_playing_ && decode_thread_) {
+        decode_thread_->set_stereo_mode(view);
+        decode_thread_->clear_buffer();  // 버퍼 클리어하여 새 모드로 디코딩
+    }
+
+    // 현재 프레임 다시 로드
+    if (has_clip_) {
+        load_frame(current_frame_);
+    }
+}
+
+void MainWindow::keyPressEvent(QKeyEvent* event) {
+    if (!has_clip_) {
+        QMainWindow::keyPressEvent(event);
+        return;
+    }
+
+    const auto info = decoder_.clip_info();
+    const bool has_stereo = info && info->has_immersive_video && info->available_view_count >= 2;
+
+    switch (event->key()) {
+        case Qt::Key_S:
+            // 재생/일시정지
+            handle_play_pause();
+            break;
+
+        case Qt::Key_A:
+            // 이전 프레임
+            if (!is_playing_ && current_frame_ > 0) {
+                load_frame(current_frame_ - 1);
+            }
+            break;
+
+        case Qt::Key_D:
+            // 다음 프레임
+            if (!is_playing_ && info && current_frame_ < info->frame_count - 1) {
+                load_frame(current_frame_ + 1);
+            }
+            break;
+
+        case Qt::Key_Z:
+            // 좌안 보기
+            if (has_stereo) {
+                set_stereo_view(0);
+            }
+            break;
+
+        case Qt::Key_C:
+            // 우안 보기
+            if (has_stereo) {
+                set_stereo_view(1);
+            }
+            break;
+
+        case Qt::Key_X:
+            // SBS 모드 토글
+            if (has_stereo) {
+                set_stereo_view(2);
+            }
+            break;
+
+        default:
+            QMainWindow::keyPressEvent(event);
+            break;
+    }
 }
