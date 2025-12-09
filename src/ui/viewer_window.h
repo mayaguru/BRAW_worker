@@ -24,6 +24,15 @@ class TimelineSlider;
 class ImageViewer;
 class MainWindow;
 
+// 렌더링 설정 (스레드 안전한 스냅샷용)
+struct RenderSettings {
+    uint32_t scale{4};
+    bool color_transform{true};
+    float exposure{0.0f};
+    float gain{1.0f};
+    float gamma{1.0f};
+};
+
 // 백그라운드 디코딩 스레드
 class DecodeThread : public QThread {
     Q_OBJECT
@@ -37,11 +46,26 @@ class DecodeThread : public QThread {
     bool get_next_frame(QImage& out_image, uint32_t& out_frame_index);
     void clear_buffer();
     void set_stereo_mode(int view) { stereo_view_ = view; }
-    void set_downsample_scale(uint32_t scale) { downsample_scale_ = scale; }
-    void set_color_transform(bool enabled) { color_transform_ = enabled; }
-    void set_exposure(float ev) { exposure_ = ev; }
-    void set_gain(float gain) { gain_ = gain; }
-    void set_gamma(float gamma) { gamma_ = gamma; }
+    void set_downsample_scale(uint32_t scale) { 
+        QMutexLocker lock(&settings_mutex_);
+        settings_.scale = scale; 
+    }
+    void set_color_transform(bool enabled) { 
+        QMutexLocker lock(&settings_mutex_);
+        settings_.color_transform = enabled; 
+    }
+    void set_exposure(float ev) { 
+        QMutexLocker lock(&settings_mutex_);
+        settings_.exposure = ev; 
+    }
+    void set_gain(float gain) { 
+        QMutexLocker lock(&settings_mutex_);
+        settings_.gain = gain; 
+    }
+    void set_gamma(float gamma) { 
+        QMutexLocker lock(&settings_mutex_);
+        settings_.gamma = gamma; 
+    }
 
   signals:
     void frame_ready();
@@ -59,11 +83,16 @@ class DecodeThread : public QThread {
 
     std::atomic<bool> running_{false};
     std::atomic<int> stereo_view_{0};  // 0=left, 1=right, 2=sbs
-    std::atomic<uint32_t> downsample_scale_{4};  // 1=원본, 2=중간, 4=1/4
-    std::atomic<bool> color_transform_{true};  // BMDFilm → sRGB 색변환 (기본 켜짐)
-    std::atomic<float> exposure_{0.0f};  // 익스포저 조절 (EV 단위, -3 ~ +3)
-    std::atomic<float> gain_{1.0f};  // 게인 조절 (0.5 ~ 2.0)
-    std::atomic<float> gamma_{1.0f};  // 감마 (0.0 ~ 2.2, 기본 1.0)
+
+    // 렌더링 설정 (뮤텍스로 보호, 일관성 보장)
+    mutable QMutex settings_mutex_;
+    RenderSettings settings_;
+
+    // 설정 스냅샷 가져오기 (스레드 안전)
+    RenderSettings get_settings() const {
+        QMutexLocker lock(&settings_mutex_);
+        return settings_;
+    }
     uint32_t start_frame_{0};
     uint32_t frame_count_{0};
     uint32_t current_decode_frame_{0};

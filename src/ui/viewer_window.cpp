@@ -59,6 +59,8 @@ DecodeThread::DecodeThread(braw::BrawDecoder& decoder, braw::STMapWarper& stmap_
 
 DecodeThread::~DecodeThread() {
     stop_decoding();
+    // 버퍼에 남은 프레임 정리
+    clear_buffer();
 }
 
 void DecodeThread::start_decoding(uint32_t start_frame, uint32_t frame_count, int stereo_view) {
@@ -136,11 +138,13 @@ void DecodeThread::run() {
 }
 
 QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
-    const uint32_t scale = downsample_scale_.load();
-    const bool do_color = color_transform_.load();
-    const float exp_val = exposure_.load();
-    const float gain_val = gain_.load();
-    const float gamma_val = gamma_.load();
+    // 설정 스냅샷 (일관성 보장)
+    const auto settings = get_settings();
+    const uint32_t scale = settings.scale;
+    const bool do_color = settings.color_transform;
+    const float exp_val = settings.exposure;
+    const float gain_val = settings.gain;
+    const float gamma_val = settings.gamma;
 
     // BMDFilm WideGamut Gen5 → ACEScg 3x3 매트릭스
     // ACEScg는 리니어 색공간이므로 뷰어에서는 sRGB EOTF를 적용하여 표시

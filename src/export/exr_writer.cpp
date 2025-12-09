@@ -19,6 +19,21 @@ namespace OCIO = OCIO_NAMESPACE;
 
 namespace braw {
 
+// OCIO 설정 파일 경로 (기본값)
+// 환경변수 OCIO가 설정되어 있으면 그것을 우선 사용
+static const char* DEFAULT_OCIO_CONFIG = "P:/00-GIGA/BRAW_CLI/studio-config-v2.1.0_aces-v1.3_ocio-v2.1.ocio";
+
+static const char* get_ocio_config_path() {
+    // 환경변수 OCIO 확인
+    if (const char* env_path = std::getenv("OCIO")) {
+        if (std::filesystem::exists(env_path)) {
+            return env_path;
+        }
+    }
+    // 기본 경로 사용
+    return DEFAULT_OCIO_CONFIG;
+}
+
 namespace {
 
 #if OPENEXR_AVAILABLE
@@ -77,8 +92,8 @@ bool write_exr_half_dwaa(const std::filesystem::path& output_path,
 #if OCIO_AVAILABLE
         if (!input_colorspace.empty() && !output_colorspace.empty()) {
             try {
-                // 외부 config 파일 사용 (절대 경로)
-                const char* config_file = "P:/00-GIGA/BRAW_CLI/studio-config-v2.1.0_aces-v1.3_ocio-v2.1.ocio";
+                // 외부 config 파일 사용
+                const char* config_file = get_ocio_config_path();
                 std::cout << "[INFO] OCIO config 로드: " << config_file << "\n";
                 auto config = OCIO::Config::CreateFromFile(config_file);
 

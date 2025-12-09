@@ -146,6 +146,10 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
         return E_NOINTERFACE;
     }
 
+    // NOTE: COM 참조 카운팅 미구현 (항상 1 반환)
+    // 이 콜백은 스택에 할당되어 decode_frame() 내에서만 사용되므로
+    // 실제 참조 카운팅이 필요하지 않음. SDK가 Release()를 호출해도
+    // 객체가 삭제되지 않아야 하므로 의도적으로 1을 반환함.
     ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
     ULONG STDMETHODCALLTYPE Release() override { return 1; }
 
