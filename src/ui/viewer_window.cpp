@@ -1,4 +1,4 @@
-#include "main_window.h"
+#include "viewer_window.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -277,6 +277,7 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(central);
     setWindowTitle(tr("BRAW Viewer"));
     resize(1280, 800);
+    setAcceptDrops(true);  // 드래그 앤 드롭 활성화
 
     // 타이머 설정
     playback_timer_ = new QTimer(this);
@@ -315,10 +316,20 @@ void MainWindow::handle_open_clip() {
     if (file.isEmpty()) {
         return;
     }
+    open_braw_file(file);
+}
 
+void MainWindow::open_braw_file(const QString& file) {
     // 기존 디코딩 중지
     if (decode_thread_) {
         decode_thread_->stop_decoding();
+    }
+
+    // 재생 중이면 정지
+    if (is_playing_) {
+        is_playing_ = false;
+        playback_timer_->stop();
+        play_button_->setText(tr("▶ 재생"));
     }
 
     const std::filesystem::path clip_path = file.toStdWString();
@@ -760,4 +771,37 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
         return;
     }
     display_image(last_image_);
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (event->mimeData()->hasUrls()) {
+        const auto urls = event->mimeData()->urls();
+        for (const auto& url : urls) {
+            if (url.isLocalFile()) {
+                const QString path = url.toLocalFile();
+                if (path.toLower().endsWith(".braw")) {
+                    event->acceptProposedAction();
+                    return;
+                }
+            }
+        }
+    }
+    event->ignore();
+}
+
+void MainWindow::dropEvent(QDropEvent* event) {
+    if (event->mimeData()->hasUrls()) {
+        const auto urls = event->mimeData()->urls();
+        for (const auto& url : urls) {
+            if (url.isLocalFile()) {
+                const QString path = url.toLocalFile();
+                if (path.toLower().endsWith(".braw")) {
+                    open_braw_file(path);
+                    event->acceptProposedAction();
+                    return;
+                }
+            }
+        }
+    }
+    event->ignore();
 }

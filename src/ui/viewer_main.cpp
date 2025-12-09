@@ -5,7 +5,7 @@
 #include <combaseapi.h>
 #endif
 
-#include "main_window.h"
+#include "viewer_window.h"
 
 int main(int argc, char* argv[]) {
     // Qt가 COM을 초기화하도록 놔둠

@@ -5,6 +5,9 @@
 #include <QThread>
 #include <QMutex>
 #include <QWaitCondition>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <atomic>
 #include <queue>
 
@@ -77,7 +80,10 @@ class MainWindow : public QMainWindow {
     void load_frame(uint32_t frame_index);
     void update_ui_state();
     void display_image(const QImage& image);
+    void open_braw_file(const QString& file_path);
     void resizeEvent(QResizeEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
     braw::BrawDecoder decoder_;
     braw::FrameBuffer frame_buffer_left_;

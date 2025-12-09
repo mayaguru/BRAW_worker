@@ -1,8 +1,8 @@
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(braw_viewer
-    main.cpp
-    main_window.cpp
+    viewer_main.cpp
+    viewer_window.cpp
 )
 
 target_include_directories(braw_viewer
