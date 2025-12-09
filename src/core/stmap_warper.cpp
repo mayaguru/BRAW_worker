@@ -29,7 +29,7 @@ bool STMapWarper::load_stmap(const std::filesystem::path& exr_path) {
             }
         }
 
-        // EXR 파일 열기
+        // EXR 파일 열기 - InputFile로 직접 float32 읽기
         Imf::InputFile file(exr_path.string().c_str());
         const Imf::Header& header = file.header();
         const Imath::Box2i& dataWindow = header.dataWindow();
@@ -46,23 +46,44 @@ bool STMapWarper::load_stmap(const std::filesystem::path& exr_path) {
             return false;
         }
 
-        // RGBA로 읽기 (간단하게)
-        Imf::Array2D<Imf::Rgba> pixels(height, width);
-        Imf::RgbaInputFile rgba_file(exr_path.string().c_str());
-        rgba_file.setFrameBuffer(&pixels[0][0] - dataWindow.min.x - dataWindow.min.y * width, 1, width);
-        rgba_file.readPixels(dataWindow.min.y, dataWindow.max.y);
-
-        // RG만 추출 (ST 좌표)
+        // RG 채널만 float32로 직접 읽기 (half-float 손실 방지)
         stmap_.width = width;
         stmap_.height = height;
         stmap_.data.resize(width * height * 2);
 
+        // 임시 버퍼 (R, G 각각)
+        std::vector<float> r_channel(width * height);
+        std::vector<float> g_channel(width * height);
+
+        // FrameBuffer 설정 - float32로 직접 읽기
+        Imf::FrameBuffer frameBuffer;
+
+        // R 채널 설정 (stride: sizeof(float), y stride: width * sizeof(float))
+        frameBuffer.insert("R", Imf::Slice(
+            Imf::FLOAT,
+            reinterpret_cast<char*>(r_channel.data()) - dataWindow.min.x * sizeof(float) - dataWindow.min.y * width * sizeof(float),
+            sizeof(float),      // xStride
+            width * sizeof(float)  // yStride
+        ));
+
+        // G 채널 설정
+        frameBuffer.insert("G", Imf::Slice(
+            Imf::FLOAT,
+            reinterpret_cast<char*>(g_channel.data()) - dataWindow.min.x * sizeof(float) - dataWindow.min.y * width * sizeof(float),
+            sizeof(float),
+            width * sizeof(float)
+        ));
+
+        file.setFrameBuffer(frameBuffer);
+        file.readPixels(dataWindow.min.y, dataWindow.max.y);
+
+        // RG를 인터리브 형식으로 저장
         for (uint32_t y = 0; y < height; ++y) {
             for (uint32_t x = 0; x < width; ++x) {
-                const Imf::Rgba& pixel = pixels[y][x];
-                const size_t idx = (y * width + x) * 2;
-                stmap_.data[idx + 0] = pixel.r;  // U (S)
-                stmap_.data[idx + 1] = pixel.g;  // V (T)
+                const size_t src_idx = y * width + x;
+                const size_t dst_idx = src_idx * 2;
+                stmap_.data[dst_idx + 0] = r_channel[src_idx];  // U (S)
+                stmap_.data[dst_idx + 1] = g_channel[src_idx];  // V (T)
             }
         }
 
