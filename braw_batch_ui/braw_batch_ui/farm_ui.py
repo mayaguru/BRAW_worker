@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-BRAW Render Farm UI (PySide6)
+BRAW-Brew UI (PySide6)
 분산 렌더링 시스템 UI
 """
 
 import sys
 import subprocess
+import platform
+
+# Windows에서 콘솔 창 숨기기
+SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 import json
 import threading
 from pathlib import Path
@@ -746,7 +750,8 @@ class WorkerThread(QThread):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=timeout_sec
+                timeout=timeout_sec,
+                creationflags=SUBPROCESS_FLAGS
             )
 
             return result.returncode == 0 and output_file.exists()
@@ -806,7 +811,8 @@ class WorkerThread(QThread):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=timeout_sec
+                timeout=timeout_sec,
+                creationflags=SUBPROCESS_FLAGS
             )
 
             # 결과 로그
@@ -872,7 +878,7 @@ class FarmUI(QMainWindow):
 
     def init_ui(self):
         """UI 초기화"""
-        self.setWindowTitle("BRAW Render Farm")
+        self.setWindowTitle("BRAW-Brew")
         self.setGeometry(100, 100, 1400, 800)
         self.setMinimumSize(1200, 700)
 
@@ -1033,7 +1039,7 @@ class FarmUI(QMainWindow):
         toolbar_layout.setContentsMargins(15, 8, 15, 8)
 
         # 타이틀
-        title_label = QLabel("🎬 BRAW Render Farm")
+        title_label = QLabel("🎬 BRAW-Brew")
         title_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4db8c4;")
         toolbar_layout.addWidget(title_label)
         toolbar_layout.addStretch()
@@ -1620,7 +1626,8 @@ class FarmUI(QMainWindow):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=CLIP_INFO_TIMEOUT_SEC
+                timeout=CLIP_INFO_TIMEOUT_SEC,
+                creationflags=SUBPROCESS_FLAGS
             )
 
             if result.returncode == 0:
@@ -1653,7 +1660,8 @@ class FarmUI(QMainWindow):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=CLIP_INFO_TIMEOUT_SEC
+                timeout=CLIP_INFO_TIMEOUT_SEC,
+                creationflags=SUBPROCESS_FLAGS
             )
 
             if result.returncode != 0:

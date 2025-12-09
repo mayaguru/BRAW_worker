@@ -1,11 +1,11 @@
-# BRAW Render Farm
+# BRAW-Brew
 
 공유 폴더 기반 분산 렌더링 시스템
 
 ## 개요
 
 3000 프레임을 10대 PC로 분산 처리하여 처리 시간을 1/10로 단축
-- **기존**: PC 1대로 2시간+ → **렌더팜**: 10대로 약 12분
+- **기존**: PC 1대로 2시간+ → **BRAW-Brew**: 10대로 약 12분
 
 ## 시스템 구조
 
@@ -35,7 +35,7 @@ P:\00-GIGA\BRAW_CLI\
 
 ## 사용 방법
 
-### 1. 렌더팜 UI 실행
+### 1. BRAW-Brew UI 실행
 
 ```bash
 # 프로젝트 루트에서
@@ -126,7 +126,7 @@ def is_expired(self, timeout_seconds=300):  # 5분
 
 **3000 프레임 처리 예상 시간:**
 - PC 1대: 약 2시간
-- PC 10대 (렌더팜): 약 12분 (10배 빠름)
+- PC 10대 (BRAW-Brew): 약 12분 (10배 빠름)
 
 **실제 성능은 다음에 따라 달라집니다:**
 - 각 PC의 CPU/GPU 성능
@@ -147,7 +147,7 @@ def is_expired(self, timeout_seconds=300):  # 5분
 - 타임아웃 설정 확인
 - CLI 실행 오류 확인
 
-## 로컬 모드 vs 렌더팜 모드
+## 로컬 모드 vs BRAW-Brew 모드
 
 ### 로컬 모드 (기존)
 ```bash
@@ -156,7 +156,7 @@ run_batch_ui.bat  # tkinter UI
 - 단일 PC에서만 실행
 - 10개 병렬 처리
 
-### 렌더팜 모드 (신규)
+### BRAW-Brew 모드 (신규)
 ```bash
 run_farm_ui.bat  # PySide6 UI
 ```

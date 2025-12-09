@@ -1,4 +1,4 @@
-# BRAW Render Farm 배포 가이드
+# BRAW-Brew 배포 가이드
 
 공유 폴더에 배포하여 여러 PC에서 실행하는 방법
 
@@ -121,7 +121,7 @@ python braw_batch_ui\run_farm.py
 
 ### 작업 제출 PC (1대)
 
-1. 렌더팜 UI 실행
+1. BRAW-Brew UI 실행
 2. **"작업 제출" 탭**으로 이동
 3. BRAW 파일 선택
 4. 출력 폴더 선택
@@ -130,7 +130,7 @@ python braw_batch_ui\run_farm.py
 
 ### 워커 PC들 (모든 PC)
 
-1. 렌더팜 UI 실행
+1. BRAW-Brew UI 실행
 2. **"워커" 탭**으로 이동
 3. 병렬 작업 수 설정 (기본: 10)
 4. **"워커 시작"** 클릭
@@ -138,7 +138,7 @@ python braw_batch_ui\run_farm.py
 
 ### 모니터링 PC (선택)
 
-1. 렌더팜 UI 실행
+1. BRAW-Brew UI 실행
 2. **"모니터링" 탭**으로 이동
 3. 실시간 진행 상황 확인
 
@@ -267,7 +267,7 @@ pip install PySide6
 각 PC에서:
 - [ ] Python 설치 확인
 - [ ] 네트워크 드라이브 연결 확인
-- [ ] 렌더팜 UI 실행 테스트
+- [ ] BRAW-Brew UI 실행 테스트
 
 작업 제출 시:
 - [ ] BRAW 파일 경로 확인

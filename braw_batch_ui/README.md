@@ -1,4 +1,4 @@
-# BRAW Batch Export UI
+# BRAW-Brew
 
 Segmented batch export tool for Blackmagic RAW files with automatic retry system.
 
