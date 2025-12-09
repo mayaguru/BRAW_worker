@@ -286,4 +286,45 @@ void STMapWarper::apply_warp_rgb888(const uint8_t* src_data, uint8_t* dst_data,
     }
 }
 
+uint32_t STMapWarper::get_square_output_size(uint32_t src_width, uint32_t src_height) const {
+    // 소스 이미지의 짧은 쪽을 기준으로 정사각형 출력 크기 계산
+    return std::min(src_width, src_height);
+}
+
+void STMapWarper::apply_warp_rgb888_square(const uint8_t* src_data, uint32_t src_width, uint32_t src_height,
+                                            uint8_t* dst_data, uint32_t out_size) const {
+    if (!enabled_ || !stmap_.is_valid()) {
+        // 비활성화 시 중앙 크롭하여 정사각형으로 복사
+        const uint32_t offset_x = (src_width - out_size) / 2;
+        const uint32_t offset_y = (src_height - out_size) / 2;
+        for (uint32_t y = 0; y < out_size; ++y) {
+            const uint8_t* src_row = src_data + ((y + offset_y) * src_width + offset_x) * 3;
+            uint8_t* dst_row = dst_data + y * out_size * 3;
+            std::memcpy(dst_row, src_row, out_size * 3);
+        }
+        return;
+    }
+
+    // STMAP 좌표를 정사각형 출력에 맞게 매핑
+    const float map_scale_x = static_cast<float>(stmap_.width - 1) / static_cast<float>(out_size - 1);
+    const float map_scale_y = static_cast<float>(stmap_.height - 1) / static_cast<float>(out_size - 1);
+
+    for (uint32_t y = 0; y < out_size; ++y) {
+        for (uint32_t x = 0; x < out_size; ++x) {
+            const float map_x = static_cast<float>(x) * map_scale_x;
+            const float map_y = static_cast<float>(y) * map_scale_y;
+
+            float u, v;
+            sample_st(map_x, map_y, u, v);
+
+            // V 좌표를 뒤집음 (STMAP은 OpenGL 스타일 - 아래에서 위로)
+            const float src_x = u * static_cast<float>(src_width - 1);
+            const float src_y = (1.0f - v) * static_cast<float>(src_height - 1);
+
+            uint8_t* dst_pixel = dst_data + (y * out_size + x) * 3;
+            sample_source_rgb888(src_data, src_width, src_height, src_x, src_y, dst_pixel);
+        }
+    }
+}
+
 }  // namespace braw

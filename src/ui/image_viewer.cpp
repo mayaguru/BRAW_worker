@@ -52,6 +52,16 @@ void ImageViewer::paintEvent(QPaintEvent* /*event*/) {
     // 배경
     painter.fillRect(rect(), QColor(16, 16, 16));
 
+    // 그리드 그리기 (128x128)
+    constexpr int grid_size = 128;
+    painter.setPen(QPen(QColor(32, 32, 32), 1));
+    for (int x = 0; x < width(); x += grid_size) {
+        painter.drawLine(x, 0, x, height());
+    }
+    for (int y = 0; y < height(); y += grid_size) {
+        painter.drawLine(0, y, width(), y);
+    }
+
     if (image_.isNull()) {
         painter.setPen(QColor(128, 128, 128));
         painter.drawText(rect(), Qt::AlignCenter,

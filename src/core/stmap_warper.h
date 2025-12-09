@@ -39,9 +39,17 @@ class STMapWarper {
     // QImage에 워핑 적용 (RGB888)
     void apply_warp_rgb888(const uint8_t* src_data, uint8_t* dst_data, uint32_t width, uint32_t height) const;
 
+    // 1:1 비율로 워핑 적용 (RGB888)
+    // out_size: 출력 정사각형 크기
+    void apply_warp_rgb888_square(const uint8_t* src_data, uint32_t src_width, uint32_t src_height,
+                                   uint8_t* dst_data, uint32_t out_size) const;
+
     bool is_loaded() const { return stmap_.is_valid(); }
     uint32_t map_width() const { return stmap_.width; }
     uint32_t map_height() const { return stmap_.height; }
+
+    // 1:1 출력 크기 계산 (정사각형)
+    uint32_t get_square_output_size(uint32_t src_width, uint32_t src_height) const;
 
     // 활성화 상태
     void set_enabled(bool enabled) { enabled_ = enabled; }

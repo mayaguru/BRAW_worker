@@ -15,6 +15,7 @@
 #include "core/braw_decoder.h"
 #include "core/stmap_warper.h"
 
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QTimer;
@@ -35,6 +36,7 @@ class DecodeThread : public QThread {
     bool get_next_frame(QImage& out_image, uint32_t& out_frame_index);
     void clear_buffer();
     void set_stereo_mode(int view) { stereo_view_ = view; }
+    void set_downsample_scale(uint32_t scale) { downsample_scale_ = scale; }
 
   signals:
     void frame_ready();
@@ -52,6 +54,7 @@ class DecodeThread : public QThread {
 
     std::atomic<bool> running_{false};
     std::atomic<int> stereo_view_{0};  // 0=left, 1=right, 2=sbs
+    std::atomic<uint32_t> downsample_scale_{4};  // 1=원본, 2=중간, 4=1/4
     uint32_t start_frame_{0};
     uint32_t frame_count_{0};
     uint32_t current_decode_frame_{0};
@@ -90,6 +93,7 @@ class MainWindow : public QMainWindow {
     void dropEvent(QDropEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void set_stereo_view(int view);  // 0=left, 1=right, 2=sbs
+    void set_downsample_scale(int index);  // 0=1/4, 1=1/2, 2=원본
     void toggle_stmap();
     void load_stmap();
 
@@ -114,11 +118,13 @@ class MainWindow : public QMainWindow {
     QPushButton* right_button_{nullptr};
     QPushButton* sbs_button_{nullptr};
     QPushButton* stmap_button_{nullptr};
+    QComboBox* resolution_combo_{nullptr};
 
     uint32_t current_frame_{0};
     bool is_playing_{false};
     bool has_clip_{false};
     int stereo_view_{0};  // 0=left, 1=right, 2=sbs
+    uint32_t downsample_scale_{4};  // 1=원본, 2=중간, 4=1/4
 
     QImage convert_to_qimage(const braw::FrameBuffer& buffer) const;
     QImage create_sbs_image(const braw::FrameBuffer& left, const braw::FrameBuffer& right) const;
