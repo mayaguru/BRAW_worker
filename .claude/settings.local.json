@@ -75,7 +75,9 @@
       "Bash(python3:*)",
       "Bash(start P:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe)",
       "Bash(timeout:*)",
-      "Bash(git mv:*)"
+      "Bash(git mv:*)",
+      "Bash(exiftool:*)",
+      "Bash(start \"p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe\")"
     ],
     "deny": [],
     "ask": []

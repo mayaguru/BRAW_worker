@@ -125,6 +125,7 @@ class MainWindow : public QMainWindow {
     bool has_clip_{false};
     int stereo_view_{0};  // 0=left, 1=right, 2=sbs
     uint32_t downsample_scale_{4};  // 1=원본, 2=중간, 4=1/4
+    QString current_clip_path_;  // 현재 열린 클립 경로
 
     QImage convert_to_qimage(const braw::FrameBuffer& buffer) const;
     QImage create_sbs_image(const braw::FrameBuffer& left, const braw::FrameBuffer& right) const;

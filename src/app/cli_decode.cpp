@@ -18,6 +18,7 @@
 
 #include "core/braw_decoder.h"
 #include "core/frame_buffer.h"
+#include "core/stmap_warper.h"
 #include "export/exr_writer.h"
 #include "export/image_writer.h"
 
@@ -41,6 +42,8 @@ struct Arguments {
     std::string input_colorspace{"BMDFilm WideGamut Gen5"};
     std::string output_colorspace{"ACEScg"};
     bool quiet{false};
+    std::filesystem::path stmap_path;  // STMAP EXR 경로 (왜곡 보정용)
+    bool use_stmap{false};
 };
 
 std::optional<EyeMode> parse_eye_mode(const std::string& token) {
@@ -75,6 +78,7 @@ void print_usage() {
     std::cerr << "Usage: braw_cli <clip.braw> <output_dir> <start-end> <eye> [options]\n";
     std::cerr << "  eye: left, right, both, sbs\n";
     std::cerr << "  --aces --gamma --quiet --format=exr|ppm --prefix=NAME\n";
+    std::cerr << "  --stmap=<path.exr>  Apply ST Map distortion correction (outputs 1:1 square)\n";
 }
 
 std::optional<Arguments> parse_arguments(int argc, char** argv) {
@@ -111,6 +115,10 @@ std::optional<Arguments> parse_arguments(int argc, char** argv) {
         else if (arg.rfind("--prefix=", 0) == 0) args.output_prefix = arg.substr(9);
         else if (arg.rfind("--input-cs=", 0) == 0) args.input_colorspace = arg.substr(11);
         else if (arg.rfind("--output-cs=", 0) == 0) args.output_colorspace = arg.substr(12);
+        else if (arg.rfind("--stmap=", 0) == 0) {
+            args.stmap_path = arg.substr(8);
+            args.use_stmap = true;
+        }
     }
     return args;
 }
@@ -160,6 +168,18 @@ int main(int argc, char** argv) {
         }
     }
 
+    // STMAP warper 초기화
+    braw::STMapWarper stmap_warper;
+    if (args->use_stmap) {
+        if (!stmap_warper.load_stmap(args->stmap_path)) {
+            std::cerr << "Failed to load STMAP: " << args->stmap_path << "\n";
+            return 1;
+        }
+        stmap_warper.set_enabled(true);
+        std::cout << "STMAP loaded: " << args->stmap_path.filename() << " ("
+                  << stmap_warper.map_width() << "x" << stmap_warper.map_height() << ")\n";
+    }
+
     uint32_t end_frame = args->end_frame;
     if (info && end_frame >= info->frame_count)
         end_frame = static_cast<uint32_t>(info->frame_count - 1);
@@ -194,10 +214,32 @@ int main(int argc, char** argv) {
         case EyeMode::kBoth:  std::cout << "BOTH\n"; break;
         case EyeMode::kSBS:   std::cout << "SBS\n"; break;
     }
+    if (args->use_stmap) {
+        std::cout << "STMAP: Enabled (1:1 square output)\n";
+    }
 
     braw::FrameBuffer buffer_left, buffer_right;
+    braw::FrameBuffer warped_left, warped_right;  // STMAP 적용 결과
     auto start_time = std::chrono::steady_clock::now();
     uint32_t completed = 0, failed = 0;
+
+    // STMAP 적용 시 출력 크기 = STMAP 크기
+    uint32_t square_size = 0;
+    if (args->use_stmap) {
+        square_size = stmap_warper.get_output_size();
+        std::cout << "Output size: " << square_size << "x" << square_size << "\n";
+    }
+
+    // STMAP 워핑 적용 헬퍼 람다
+    auto apply_stmap = [&](const braw::FrameBuffer& src, braw::FrameBuffer& dst) {
+        if (!args->use_stmap) {
+            dst = src;
+            return;
+        }
+        dst.resize(square_size, square_size);
+        stmap_warper.apply_warp_float_square(src.data.data(), src.width, src.height,
+                                              dst.data.data(), square_size);
+    };
 
     for (uint32_t frame_idx = args->start_frame; frame_idx <= end_frame; ++frame_idx) {
         bool frame_ok = true;
@@ -207,7 +249,11 @@ int main(int argc, char** argv) {
             if (!decoder.decode_frame(frame_idx, buffer_left, braw::StereoView::kLeft)) frame_ok = false;
             else if (!decoder.decode_frame(frame_idx, buffer_right, braw::StereoView::kRight)) frame_ok = false;
             else {
-                braw::FrameBuffer sbs_buffer = braw::merge_sbs(buffer_left, buffer_right);
+                // STMAP 적용
+                apply_stmap(buffer_left, warped_left);
+                apply_stmap(buffer_right, warped_right);
+
+                braw::FrameBuffer sbs_buffer = braw::merge_sbs(warped_left, warped_right);
                 bool write_ok = (args->format == OutputFormat::kEXR) ?
                     braw::write_exr_half_dwaa(out_path, sbs_buffer, 45.0f,
                         args->use_aces ? args->input_colorspace : "",
@@ -220,11 +266,14 @@ int main(int argc, char** argv) {
             auto out_path = build_output_path(left_dir, args->output_prefix, frame_idx, ext);
             if (!decoder.decode_frame(frame_idx, buffer_left, braw::StereoView::kLeft)) frame_ok = false;
             else {
+                // STMAP 적용
+                apply_stmap(buffer_left, warped_left);
+
                 bool write_ok = (args->format == OutputFormat::kEXR) ?
-                    braw::write_exr_half_dwaa(out_path, buffer_left, 45.0f,
+                    braw::write_exr_half_dwaa(out_path, warped_left, 45.0f,
                         args->use_aces ? args->input_colorspace : "",
                         args->use_aces ? args->output_colorspace : "", args->apply_gamma) :
-                    braw::write_ppm(out_path, buffer_left);
+                    braw::write_ppm(out_path, warped_left);
                 if (write_ok) ++completed; else frame_ok = false;
             }
         }
@@ -233,11 +282,14 @@ int main(int argc, char** argv) {
             auto out_path = build_output_path(right_dir, args->output_prefix, frame_idx, ext);
             if (!decoder.decode_frame(frame_idx, buffer_right, braw::StereoView::kRight)) frame_ok = false;
             else {
+                // STMAP 적용
+                apply_stmap(buffer_right, warped_right);
+
                 bool write_ok = (args->format == OutputFormat::kEXR) ?
-                    braw::write_exr_half_dwaa(out_path, buffer_right, 45.0f,
+                    braw::write_exr_half_dwaa(out_path, warped_right, 45.0f,
                         args->use_aces ? args->input_colorspace : "",
                         args->use_aces ? args->output_colorspace : "", args->apply_gamma) :
-                    braw::write_ppm(out_path, buffer_right);
+                    braw::write_ppm(out_path, warped_right);
                 if (write_ok) ++completed; else frame_ok = false;
             }
         }

@@ -2,9 +2,11 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -13,8 +15,10 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPixmap>
+#include <QProcess>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QResizeEvent>
 #include "timeline_slider.h"
 #include "image_viewer.h"
@@ -186,9 +190,9 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
             }
         }
 
-        // STMAP 워핑 적용 (1:1 정사각형 출력)
+        // STMAP 워핑 적용 (출력 크기 = STMAP 크기)
         if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
-            const uint32_t square_size = stmap_warper_.get_square_output_size(single_width, out_height);
+            const uint32_t square_size = stmap_warper_.get_output_size();
 
             // 좌안 워핑
             std::vector<uint8_t> left_rgb(single_width * out_height * 3);
@@ -254,9 +258,9 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
             }
         }
 
-        // STMAP 워핑 적용 (1:1 정사각형 출력)
+        // STMAP 워핑 적용 (출력 크기 = STMAP 크기)
         if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
-            const uint32_t square_size = stmap_warper_.get_square_output_size(out_width, out_height);
+            const uint32_t square_size = stmap_warper_.get_output_size();
 
             std::vector<uint8_t> src_rgb(out_width * out_height * 3);
             for (uint32_t y = 0; y < out_height; ++y) {
@@ -454,6 +458,7 @@ void MainWindow::open_braw_file(const QString& file) {
     current_frame_ = 0;
     has_clip_ = true;
     is_playing_ = false;
+    current_clip_path_ = file;  // 클립 경로 저장
 
     const auto info = decoder_.clip_info();
     if (info) {
@@ -557,10 +562,34 @@ void MainWindow::handle_export() {
     eye_combo->addItem(tr("우안만"), "right");
     if (has_stereo) {
         eye_combo->addItem(tr("양안 (L, R 폴더)"), "both");
-        eye_combo->setCurrentIndex(2);
+        eye_combo->addItem(tr("SBS (좌우 합친 파일)"), "sbs");
+        eye_combo->setCurrentIndex(3);  // SBS 기본
     }
     stereo_layout->addWidget(eye_combo);
     layout->addWidget(stereo_group);
+
+    // STMAP 옵션
+    auto* stmap_group = new QGroupBox(tr("STMAP 왜곡 보정"), &dialog);
+    auto* stmap_layout = new QVBoxLayout(stmap_group);
+    auto* stmap_check = new QCheckBox(tr("STMAP 적용"), &dialog);
+    auto* stmap_combo = new QComboBox(&dialog);
+    stmap_combo->addItem(tr("4K (3840x3840)"), "4k");
+    stmap_combo->addItem(tr("8K (7680x7680)"), "8k");
+    stmap_combo->setCurrentIndex(1);  // 8K 기본
+    stmap_combo->setEnabled(false);
+    stmap_layout->addWidget(stmap_check);
+    stmap_layout->addWidget(stmap_combo);
+    layout->addWidget(stmap_group);
+
+    connect(stmap_check, &QCheckBox::toggled, stmap_combo, &QComboBox::setEnabled);
+
+    // ACES 색공간 옵션
+    auto* aces_group = new QGroupBox(tr("색공간"), &dialog);
+    auto* aces_layout = new QVBoxLayout(aces_group);
+    auto* aces_check = new QCheckBox(tr("ACES 색공간 변환 (BMDFilm WideGamut Gen5 → ACEScg)"), &dialog);
+    aces_check->setChecked(true);  // 기본 활성화
+    aces_layout->addWidget(aces_check);
+    layout->addWidget(aces_group);
 
     // 프레임 범위
     auto* range_group = new QGroupBox(tr("프레임 범위"), &dialog);
@@ -601,80 +630,110 @@ void MainWindow::handle_export() {
 
     const QString format = format_combo->currentData().toString();
     const QString eye_mode = eye_combo->currentData().toString();
-    const QString ext = format == "exr" ? ".exr" : ".ppm";
     const int in_frame = in_spin->value();
     const int out_frame = out_spin->value();
+    const bool use_stmap = stmap_check->isChecked();
+    const QString stmap_size = stmap_combo->currentData().toString();
+    const bool use_aces = aces_check->isChecked();
 
     if (in_frame > out_frame) {
         QMessageBox::warning(this, tr("경고"), tr("In 포인트는 Out 포인트보다 작아야 합니다."));
         return;
     }
 
-    std::filesystem::path left_dir = output_dir;
-    std::filesystem::path right_dir = output_dir;
-
-    if (eye_mode == "both") {
-        left_dir = output_dir / "L";
-        right_dir = output_dir / "R";
-        std::filesystem::create_directories(left_dir);
-        std::filesystem::create_directories(right_dir);
+    // CLI 실행 파일 경로 찾기
+    QString exe_path = QCoreApplication::applicationDirPath() + "/braw_cli.exe";
+    if (!QFile::exists(exe_path)) {
+        QMessageBox::critical(this, tr("오류"), tr("braw_cli.exe를 찾을 수 없습니다."));
+        return;
     }
 
-    auto export_frame = [&](uint32_t frame_idx, braw::StereoView view,
-                           const std::filesystem::path& out_dir) -> bool {
-        braw::FrameBuffer buffer;
-        if (!decoder_.decode_frame(frame_idx, buffer, view)) {
-            return false;
-        }
-
-        char filename[32];
-        snprintf(filename, sizeof(filename), "frame_%04u%s", frame_idx, ext.toStdString().c_str());
-        const auto output_path = out_dir / filename;
-
-        if (format == "exr") {
-            return braw::write_exr_half_dwaa(output_path, buffer, 45.0f);
+    // STMAP 경로 설정
+    QString stmap_path;
+    if (use_stmap) {
+        QString stmap_dir = QCoreApplication::applicationDirPath() + "/../STMAP";
+        if (stmap_size == "4k") {
+            stmap_path = stmap_dir + "/AVP_STmap_4k.exr";
         } else {
-            return braw::write_ppm(output_path, buffer);
+            stmap_path = stmap_dir + "/AVP_STmap_8k.exr";
         }
-    };
+        if (!QFile::exists(stmap_path)) {
+            // 대체 경로 시도
+            stmap_dir = "P:/00-GIGA/BRAW_CLI/STMAP";
+            if (stmap_size == "4k") {
+                stmap_path = stmap_dir + "/AVP_STmap_4k.exr";
+            } else {
+                stmap_path = stmap_dir + "/AVP_STmap_8k.exr";
+            }
+        }
+        if (!QFile::exists(stmap_path)) {
+            QMessageBox::critical(this, tr("오류"), tr("STMAP 파일을 찾을 수 없습니다: %1").arg(stmap_path));
+            return;
+        }
+    }
 
-    QProgressDialog progress(tr("내보내는 중..."), tr("취소"), in_frame, out_frame, this);
+    // CLI 명령어 구성
+    QStringList args;
+    args << current_clip_path_;
+    args << output_folder;
+    args << QString("%1-%2").arg(in_frame).arg(out_frame);
+    args << eye_mode;
+    args << QString("--format=%1").arg(format);
+
+    if (use_aces) {
+        args << "--aces";
+    }
+
+    if (use_stmap) {
+        args << QString("--stmap=%1").arg(stmap_path);
+    }
+
+    // CLI 실행
+    QProcess process;
+    process.setWorkingDirectory(QCoreApplication::applicationDirPath());
+
+    QProgressDialog progress(tr("내보내는 중..."), tr("취소"), 0, 100, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
+    progress.setValue(0);
 
-    bool success = true;
-    for (int frame = in_frame; frame <= out_frame; ++frame) {
+    process.start(exe_path, args);
+
+    // 프로세스 출력 모니터링
+    while (process.state() == QProcess::Running) {
+        QCoreApplication::processEvents();
         if (progress.wasCanceled()) {
-            success = false;
-            break;
+            process.kill();
+            QMessageBox::warning(this, tr("취소"), tr("내보내기가 취소되었습니다."));
+            return;
         }
 
-        progress.setValue(frame);
-        progress.setLabelText(tr("프레임 %1 / %2 내보내는 중...").arg(frame).arg(out_frame));
-
-        if (eye_mode == "both") {
-            if (!export_frame(static_cast<uint32_t>(frame), braw::StereoView::kLeft, left_dir) ||
-                !export_frame(static_cast<uint32_t>(frame), braw::StereoView::kRight, right_dir)) {
-                success = false;
-                break;
-            }
-        } else {
-            const braw::StereoView view = (eye_mode == "right") ?
-                braw::StereoView::kRight : braw::StereoView::kLeft;
-            if (!export_frame(static_cast<uint32_t>(frame), view, output_dir)) {
-                success = false;
-                break;
+        // stdout에서 진행률 파싱
+        QString output = process.readAllStandardOutput();
+        if (!output.isEmpty()) {
+            // [XX%] 형태의 진행률 파싱
+            QRegularExpression re("\\[(\\d+)%\\]");
+            auto match = re.match(output);
+            if (match.hasMatch()) {
+                int pct = match.captured(1).toInt();
+                progress.setValue(pct);
             }
         }
+        QThread::msleep(100);
     }
 
-    progress.setValue(out_frame);
+    process.waitForFinished();
+    progress.setValue(100);
 
-    if (success) {
+    int exit_code = process.exitCode();
+    QString stderr_output = process.readAllStandardError();
+
+    if (exit_code == 0) {
         QMessageBox::information(this, tr("완료"),
             tr("내보내기가 완료되었습니다.\n경로: %1").arg(output_folder));
     } else {
-        QMessageBox::critical(this, tr("오류"), tr("내보내기에 실패했습니다."));
+        QMessageBox::critical(this, tr("오류"),
+            tr("내보내기에 실패했습니다.\n종료 코드: %1\n%2").arg(exit_code).arg(stderr_output));
     }
 }
 
@@ -828,9 +887,9 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
         }
     }
 
-    // STMAP 워핑 적용 (각 눈에 개별 적용, 1:1 정사각형 출력)
+    // STMAP 워핑 적용 (출력 크기 = STMAP 크기)
     if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
-        const uint32_t square_size = stmap_warper_.get_square_output_size(single_width, out_height);
+        const uint32_t square_size = stmap_warper_.get_output_size();
 
         QImage left_warped(square_size, square_size, QImage::Format_RGB888);
         QImage right_warped(square_size, square_size, QImage::Format_RGB888);
@@ -899,9 +958,9 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
         }
     }
 
-    // STMAP 워핑 적용 (1:1 정사각형 출력)
+    // STMAP 워핑 적용 (출력 크기 = STMAP 크기)
     if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
-        const uint32_t square_size = stmap_warper_.get_square_output_size(out_width, out_height);
+        const uint32_t square_size = stmap_warper_.get_output_size();
         QImage warped(square_size, square_size, QImage::Format_RGB888);
         stmap_warper_.apply_warp_rgb888_square(image.bits(), out_width, out_height,
                                                 warped.bits(), square_size);
