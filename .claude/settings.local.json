@@ -77,7 +77,8 @@
       "Bash(timeout:*)",
       "Bash(git mv:*)",
       "Bash(exiftool:*)",
-      "Bash(start \"p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe\")"
+      "Bash(start \"p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe\")",
+      "Bash(start p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe)"
     ],
     "deny": [],
     "ask": []

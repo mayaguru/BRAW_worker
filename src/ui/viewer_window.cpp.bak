@@ -22,7 +22,6 @@
 #include <QResizeEvent>
 #include "timeline_slider.h"
 #include "image_viewer.h"
-#include <QSlider>
 #include <QSpinBox>
 #include <QString>
 #include <QTimer>
@@ -137,48 +136,6 @@ void DecodeThread::run() {
 
 QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
     const uint32_t scale = downsample_scale_.load();
-    const bool do_color = color_transform_.load();
-    const float exp_val = exposure_.load();
-    const float gain_val = gain_.load();
-    const float gamma_val = gamma_.load();
-
-    // BMDFilm WideGamut Gen5 → ACEScg 3x3 매트릭스
-    // ACEScg는 리니어 색공간이므로 뷰어에서는 sRGB EOTF를 적용하여 표시
-    constexpr float bmd_to_acescg[9] = {
-         0.638008f,  0.214704f,  0.097744f,
-         0.002883f,  0.885057f,  0.112060f,
-        -0.012882f,  0.100272f,  0.912610f
-    };
-
-    // 익스포저 배율 (EV 단위: 2^EV)
-    const float exposure_mult = std::pow(2.0f, exp_val);
-
-    // 감마 역수 (리니어→디스플레이)
-    const float inv_gamma = 1.0f / gamma_val;
-
-    // 색변환 + 감마 적용 람다
-    auto process_pixel = [&](float r, float g, float b) -> std::tuple<unsigned char, unsigned char, unsigned char> {
-        // 익스포저 적용
-        r *= exposure_mult;
-        g *= exposure_mult;
-        b *= exposure_mult;
-
-        // ACEScg 색변환 (선택적)
-        if (do_color) {
-            float nr = bmd_to_acescg[0]*r + bmd_to_acescg[1]*g + bmd_to_acescg[2]*b;
-            float ng = bmd_to_acescg[3]*r + bmd_to_acescg[4]*g + bmd_to_acescg[5]*b;
-            float nb = bmd_to_acescg[6]*r + bmd_to_acescg[7]*g + bmd_to_acescg[8]*b;
-            r = nr; g = ng; b = nb;
-        }
-
-        // 감마 적용 (리니어→디스플레이)
-        r = std::pow(std::max(0.0f, r), inv_gamma);
-        g = std::pow(std::max(0.0f, g), inv_gamma);
-        b = std::pow(std::max(0.0f, b), inv_gamma);
-
-        auto tb = [](float v) { return static_cast<unsigned char>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-        return {tb(r), tb(g), tb(b)};
-    };
 
     auto clamp_to_byte = [](float value) -> unsigned char {
         float clamped = std::clamp(value, 0.0f, 1.0f);
@@ -218,20 +175,18 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
             for (uint32_t x = 0; x < single_width; ++x) {
                 const uint32_t src_x = x * scale;
                 const size_t idx = (src_y * buffer_left_.width + src_x) * 3;
-                auto [cr, cg, cb] = process_pixel(left_data[idx], left_data[idx + 1], left_data[idx + 2]);
-                *scan++ = cr;
-                *scan++ = cg;
-                *scan++ = cb;
+                *scan++ = clamp_to_byte(left_data[idx]);
+                *scan++ = clamp_to_byte(left_data[idx + 1]);
+                *scan++ = clamp_to_byte(left_data[idx + 2]);
             }
 
             // 우측: 우안 (원본 비율)
             for (uint32_t x = 0; x < single_width; ++x) {
                 const uint32_t src_x = x * scale;
                 const size_t idx = (src_y * buffer_right_.width + src_x) * 3;
-                auto [cr, cg, cb] = process_pixel(right_data[idx], right_data[idx + 1], right_data[idx + 2]);
-                *scan++ = cr;
-                *scan++ = cg;
-                *scan++ = cb;
+                *scan++ = clamp_to_byte(right_data[idx]);
+                *scan++ = clamp_to_byte(right_data[idx + 1]);
+                *scan++ = clamp_to_byte(right_data[idx + 2]);
             }
         }
 
@@ -297,9 +252,9 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
             for (uint32_t x = 0; x < out_width; ++x) {
                 const uint32_t src_x = x * scale;
                 const size_t idx = (src_y * buffer_left_.width + src_x) * 3;
-                auto [cr, cg, cb] = process_pixel(data[idx], data[idx + 1], data[idx + 2]); *scan++ = cr;
-                *scan++ = cg;
-                *scan++ = cb;
+                *scan++ = clamp_to_byte(data[idx]);
+                *scan++ = clamp_to_byte(data[idx + 1]);
+                *scan++ = clamp_to_byte(data[idx + 2]);
             }
         }
 
@@ -392,51 +347,6 @@ MainWindow::MainWindow(QWidget* parent)
     stmap_button_->setToolTip(tr("STMAP 왜곡 보정 토글 (W)"));
     controls->addWidget(stmap_button_);
 
-    // 색변환 버튼 (BMDFilm → ACEScg)
-    color_button_ = new QPushButton(tr("색변환 [V]"), this);
-    color_button_->setCheckable(true);
-    color_button_->setChecked(true);  // 기본값: 켜짐
-    color_button_->setToolTip(tr("색변환 토글 (V)"));
-    controls->addWidget(color_button_);
-
-    controls->addSpacing(10);
-
-    // 익스포져 슬라이더 (-3 ~ +3 EV, 0.1 단위)
-    controls->addWidget(new QLabel(tr("노출:"), this));
-    exposure_slider_ = new QSlider(Qt::Horizontal, this);
-    exposure_slider_->setRange(-30, 30);  // -3.0 ~ +3.0 EV (x10)
-    exposure_slider_->setValue(0);
-    exposure_slider_->setFixedWidth(100);
-    exposure_slider_->setToolTip(tr("익스포져 조절 (-3 ~ +3 EV)"));
-    controls->addWidget(exposure_slider_);
-
-    // 노출 리셋 버튼 (빨간 점)
-    auto* exp_reset = new QPushButton(tr("•"), this);
-    exp_reset->setFixedSize(8, 16);
-    exp_reset->setStyleSheet("QPushButton { color: #FF4444; border: none; font-size: 10px; } QPushButton:hover { color: #FF0000; }");
-    exp_reset->setToolTip(tr("노출 0으로 리셋"));
-    controls->addWidget(exp_reset);
-    connect(exp_reset, &QPushButton::clicked, this, [this]() { exposure_slider_->setValue(0); });
-
-    controls->addSpacing(10);
-
-    // 감마 슬라이더 (0.0 ~ 2.2, 0.1 단위)
-    controls->addWidget(new QLabel(tr("감마:"), this));
-    gamma_slider_ = new QSlider(Qt::Horizontal, this);
-    gamma_slider_->setRange(0, 22);  // 0.0 ~ 2.2 (x10)
-    gamma_slider_->setValue(10);  // 기본값 1.0
-    gamma_slider_->setFixedWidth(100);
-    gamma_slider_->setToolTip(tr("감마 조절 (0.0 ~ 2.2)"));
-    controls->addWidget(gamma_slider_);
-
-    // 감마 리셋 버튼 (빨간 점)
-    auto* gamma_reset = new QPushButton(tr("•"), this);
-    gamma_reset->setFixedSize(8, 16);
-    gamma_reset->setStyleSheet("QPushButton { color: #FF4444; border: none; font-size: 10px; } QPushButton:hover { color: #FF0000; }");
-    gamma_reset->setToolTip(tr("감마 1.0으로 리셋"));
-    controls->addWidget(gamma_reset);
-    connect(gamma_reset, &QPushButton::clicked, this, [this]() { gamma_slider_->setValue(10); });
-
     controls->addSpacing(20);
 
     // 해상도 (다운샘플링) 선택
@@ -498,39 +408,6 @@ MainWindow::MainWindow(QWidget* parent)
 
     // STMAP 버튼 연결
     connect(stmap_button_, &QPushButton::clicked, this, &MainWindow::toggle_stmap);
-
-    // 색변환 버튼 연결
-    connect(color_button_, &QPushButton::clicked, this, &MainWindow::toggle_color_transform);
-
-    // 익스포져 슬라이더 연결
-    connect(exposure_slider_, &QSlider::valueChanged, this, [this](int value) {
-        exposure_ = value / 10.0f;  // -3.0 ~ +3.0 EV
-        if (decode_thread_) {
-            decode_thread_->set_exposure(exposure_);
-            if (is_playing_) {
-                decode_thread_->clear_buffer();
-            }
-        }
-        if (has_clip_ && !is_playing_) {
-            load_frame(current_frame_);
-        }
-        status_label_->setText(tr("노출: %1 EV").arg(exposure_, 0, 'f', 1));
-    });
-
-    // 감마 슬라이더 연결
-    connect(gamma_slider_, &QSlider::valueChanged, this, [this](int value) {
-        gamma_ = value / 10.0f;  // 1.0 ~ 3.0
-        if (decode_thread_) {
-            decode_thread_->set_gamma(gamma_);
-            if (is_playing_) {
-                decode_thread_->clear_buffer();
-            }
-        }
-        if (has_clip_ && !is_playing_) {
-            load_frame(current_frame_);
-        }
-        status_label_->setText(tr("감마: %1").arg(gamma_, 0, 'f', 1));
-    });
 
     // 해상도 콤보 연결
     connect(resolution_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -981,35 +858,9 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
     const auto left_data = left.as_span();
     const auto right_data = right.as_span();
 
-    // 색변환 파라미터
-    const float exposure_mult = std::pow(2.0f, exposure_);
-    const float inv_gamma = 1.0f / gamma_;
-
-    // BMDFilm WideGamut Gen5 → ACEScg 매트릭스
-    constexpr float bmd_to_acescg[9] = {
-         0.638008f,  0.214704f,  0.097744f,
-         0.002883f,  0.885057f,  0.112060f,
-        -0.012882f,  0.100272f,  0.912610f
-    };
-
-    auto process_pixel = [&](float r, float g, float b) -> std::tuple<unsigned char, unsigned char, unsigned char> {
-        r *= exposure_mult;
-        g *= exposure_mult;
-        b *= exposure_mult;
-
-        if (color_transform_) {
-            float nr = bmd_to_acescg[0]*r + bmd_to_acescg[1]*g + bmd_to_acescg[2]*b;
-            float ng = bmd_to_acescg[3]*r + bmd_to_acescg[4]*g + bmd_to_acescg[5]*b;
-            float nb = bmd_to_acescg[6]*r + bmd_to_acescg[7]*g + bmd_to_acescg[8]*b;
-            r = nr; g = ng; b = nb;
-        }
-
-        r = std::pow(std::max(0.0f, r), inv_gamma);
-        g = std::pow(std::max(0.0f, g), inv_gamma);
-        b = std::pow(std::max(0.0f, b), inv_gamma);
-
-        auto tb = [](float v) { return static_cast<unsigned char>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-        return {tb(r), tb(g), tb(b)};
+    auto clamp_to_byte = [](float value) -> unsigned char {
+        float clamped = std::clamp(value, 0.0f, 1.0f);
+        return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
     };
 
     // 각 눈 별로 다운샘플링
@@ -1026,15 +877,13 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
             const size_t left_idx = (src_y * left.width + src_x) * 3;
             const size_t right_idx = (src_y * right.width + src_x) * 3;
 
-            auto [lr, lg, lb] = process_pixel(left_data[left_idx], left_data[left_idx + 1], left_data[left_idx + 2]);
-            *left_scan++ = lr;
-            *left_scan++ = lg;
-            *left_scan++ = lb;
+            *left_scan++ = clamp_to_byte(left_data[left_idx]);
+            *left_scan++ = clamp_to_byte(left_data[left_idx + 1]);
+            *left_scan++ = clamp_to_byte(left_data[left_idx + 2]);
 
-            auto [rr, rg, rb] = process_pixel(right_data[right_idx], right_data[right_idx + 1], right_data[right_idx + 2]);
-            *right_scan++ = rr;
-            *right_scan++ = rg;
-            *right_scan++ = rb;
+            *right_scan++ = clamp_to_byte(right_data[right_idx]);
+            *right_scan++ = clamp_to_byte(right_data[right_idx + 1]);
+            *right_scan++ = clamp_to_byte(right_data[right_idx + 2]);
         }
     }
 
@@ -1089,38 +938,9 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
     QImage image(out_width, out_height, QImage::Format_RGB888);
     const auto data = buffer.as_span();
 
-    // 색변환 파라미터
-    const float exposure_mult = std::pow(2.0f, exposure_);
-    const float inv_gamma = 1.0f / gamma_;
-
-    // BMDFilm WideGamut Gen5 → ACEScg 매트릭스
-    constexpr float bmd_to_acescg[9] = {
-         0.638008f,  0.214704f,  0.097744f,
-         0.002883f,  0.885057f,  0.112060f,
-        -0.012882f,  0.100272f,  0.912610f
-    };
-
-    auto process_pixel = [&](float r, float g, float b) -> std::tuple<unsigned char, unsigned char, unsigned char> {
-        // 익스포저 적용
-        r *= exposure_mult;
-        g *= exposure_mult;
-        b *= exposure_mult;
-
-        // ACEScg 색변환 (선택적)
-        if (color_transform_) {
-            float nr = bmd_to_acescg[0]*r + bmd_to_acescg[1]*g + bmd_to_acescg[2]*b;
-            float ng = bmd_to_acescg[3]*r + bmd_to_acescg[4]*g + bmd_to_acescg[5]*b;
-            float nb = bmd_to_acescg[6]*r + bmd_to_acescg[7]*g + bmd_to_acescg[8]*b;
-            r = nr; g = ng; b = nb;
-        }
-
-        // 감마 적용
-        r = std::pow(std::max(0.0f, r), inv_gamma);
-        g = std::pow(std::max(0.0f, g), inv_gamma);
-        b = std::pow(std::max(0.0f, b), inv_gamma);
-
-        auto tb = [](float v) { return static_cast<unsigned char>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-        return {tb(r), tb(g), tb(b)};
+    auto clamp_to_byte = [](float value) -> unsigned char {
+        float clamped = std::clamp(value, 0.0f, 1.0f);
+        return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
     };
 
     // 다운샘플링
@@ -1132,10 +952,9 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
             const uint32_t src_x = x * scale;
             const size_t idx = (src_y * buffer.width + src_x) * 3;
 
-            auto [cr, cg, cb] = process_pixel(data[idx], data[idx + 1], data[idx + 2]);
-            *scan++ = cr;
-            *scan++ = cg;
-            *scan++ = cb;
+            *scan++ = clamp_to_byte(data[idx]);
+            *scan++ = clamp_to_byte(data[idx + 1]);
+            *scan++ = clamp_to_byte(data[idx + 2]);
         }
     }
 
@@ -1145,9 +964,6 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
         QImage warped(square_size, square_size, QImage::Format_RGB888);
         stmap_warper_.apply_warp_rgb888_square(image.bits(), out_width, out_height,
                                                 warped.bits(), square_size);
-
-        // 워핑된 이미지 (노출/감마는 워핑 전 이미지에 이미 적용됨)
-
         return warped;
     }
 
@@ -1274,55 +1090,9 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             toggle_stmap();
             break;
 
-        case Qt::Key_V:
-            // 색변환 토글
-            toggle_color_transform();
-            break;
-
         default:
             QMainWindow::keyPressEvent(event);
             break;
-    }
-}
-
-void MainWindow::toggle_color_transform() {
-    color_transform_ = !color_transform_;
-    color_button_->setChecked(color_transform_);
-
-    // 디코드 스레드에 알림
-    if (decode_thread_) {
-        decode_thread_->set_color_transform(color_transform_);
-        if (is_playing_) {
-            decode_thread_->clear_buffer();
-        }
-    }
-
-    if (color_transform_) {
-        status_label_->setText(tr("색변환 활성화 (BMDFilm → sRGB)"));
-    } else {
-        status_label_->setText(tr("색변환 비활성화 (RAW)"));
-    }
-
-    // 현재 프레임 다시 로드
-    if (has_clip_) {
-        load_frame(current_frame_);
-    }
-}
-
-void MainWindow::update_color_settings() {
-    // 색보정 슬라이더 설정 (향후 팝업 다이얼로그에서 사용)
-    if (decode_thread_) {
-        decode_thread_->set_exposure(exposure_);
-        decode_thread_->set_gain(gain_);
-        decode_thread_->set_gamma(gamma_);
-        if (is_playing_) {
-            decode_thread_->clear_buffer();
-        }
-    }
-
-    // 현재 프레임 다시 로드
-    if (has_clip_) {
-        load_frame(current_frame_);
     }
 }
 

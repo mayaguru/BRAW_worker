@@ -18,6 +18,7 @@
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QSlider;
 class QTimer;
 class TimelineSlider;
 class ImageViewer;
@@ -37,6 +38,10 @@ class DecodeThread : public QThread {
     void clear_buffer();
     void set_stereo_mode(int view) { stereo_view_ = view; }
     void set_downsample_scale(uint32_t scale) { downsample_scale_ = scale; }
+    void set_color_transform(bool enabled) { color_transform_ = enabled; }
+    void set_exposure(float ev) { exposure_ = ev; }
+    void set_gain(float gain) { gain_ = gain; }
+    void set_gamma(float gamma) { gamma_ = gamma; }
 
   signals:
     void frame_ready();
@@ -55,6 +60,10 @@ class DecodeThread : public QThread {
     std::atomic<bool> running_{false};
     std::atomic<int> stereo_view_{0};  // 0=left, 1=right, 2=sbs
     std::atomic<uint32_t> downsample_scale_{4};  // 1=원본, 2=중간, 4=1/4
+    std::atomic<bool> color_transform_{true};  // BMDFilm → sRGB 색변환 (기본 켜짐)
+    std::atomic<float> exposure_{0.0f};  // 익스포저 조절 (EV 단위, -3 ~ +3)
+    std::atomic<float> gain_{1.0f};  // 게인 조절 (0.5 ~ 2.0)
+    std::atomic<float> gamma_{1.0f};  // 감마 (0.0 ~ 2.2, 기본 1.0)
     uint32_t start_frame_{0};
     uint32_t frame_count_{0};
     uint32_t current_decode_frame_{0};
@@ -96,6 +105,8 @@ class MainWindow : public QMainWindow {
     void set_downsample_scale(int index);  // 0=1/4, 1=1/2, 2=원본
     void toggle_stmap();
     void load_stmap();
+    void toggle_color_transform();
+    void update_color_settings();
 
     braw::BrawDecoder decoder_;
     braw::STMapWarper stmap_warper_;
@@ -118,7 +129,16 @@ class MainWindow : public QMainWindow {
     QPushButton* right_button_{nullptr};
     QPushButton* sbs_button_{nullptr};
     QPushButton* stmap_button_{nullptr};
+    QPushButton* color_button_{nullptr};  // 색변환 토글 버튼
+    QSlider* exposure_slider_{nullptr};  // 익스포져 조절
+    QSlider* gamma_slider_{nullptr};  // 감마 조절
     QComboBox* resolution_combo_{nullptr};
+
+    // 색보정 슬라이더 (팝업 다이얼로그에서 사용)
+    float exposure_{0.0f};  // -3 ~ +3 EV
+    float gain_{1.0f};  // 0.5 ~ 2.0
+    float gamma_{1.0f};  // 0.0 ~ 2.2
+    bool color_transform_{true};  // BMDFilm → sRGB 변환
 
     uint32_t current_frame_{0};
     bool is_playing_{false};

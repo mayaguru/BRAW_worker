@@ -1,0 +1,50 @@
+--- a/viewer_window.cpp
++++ b/viewer_window.cpp
+@@ -1140,6 +1140,48 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
+     }
+ }
+ 
++void MainWindow::toggle_color_transform() {
++    color_transform_ = !color_transform_;
++    color_button_->setChecked(color_transform_);
++
++    // 디코드 스레드에 알림
++    if (decode_thread_) {
++        decode_thread_->set_color_transform(color_transform_);
++        if (is_playing_) {
++            decode_thread_->clear_buffer();
++        }
++    }
++
++    if (color_transform_) {
++        status_label_->setText(tr("색변환 활성화 (BMDFilm → sRGB)"));
++    } else {
++        status_label_->setText(tr("색변환 비활성화 (RAW)"));
++    }
++
++    // 현재 프레임 다시 로드
++    if (has_clip_) {
++        load_frame(current_frame_);
++    }
++}
++
++void MainWindow::update_color_settings() {
++    // 색보정 슬라이더 설정 (향후 팝업 다이얼로그에서 사용)
++    if (decode_thread_) {
++        decode_thread_->set_exposure(exposure_);
++        decode_thread_->set_gain(gain_);
++        decode_thread_->set_gamma(gamma_);
++        if (is_playing_) {
++            decode_thread_->clear_buffer();
++        }
++    }
++
++    // 현재 프레임 다시 로드
++    if (has_clip_) {
++        load_frame(current_frame_);
++    }
++}
++
+ void MainWindow::toggle_stmap() {
+     if (!stmap_warper_.is_loaded()) {
+         status_label_->setText(tr("STMAP이 로드되지 않았습니다."));
