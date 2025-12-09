@@ -78,7 +78,11 @@
       "Bash(git mv:*)",
       "Bash(exiftool:*)",
       "Bash(start \"p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe\")",
-      "Bash(start p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe)"
+      "Bash(start p:/00-GIGA/BRAW_CLI/build/bin/braw_viewer.exe)",
+      "Bash(dir \"p:\\00-GIGA\\BRAW_CLI\\NDH6SA~M\")",
+      "Bash(git -C p:/00-GIGA/BRAW_CLI log --oneline --all -- NDH6SA~M)",
+      "Bash(git -C \"p:/00-GIGA/BRAW_CLI\" rm --cached \"NDH6SA~M\")",
+      "Bash(git -C \"p:/00-GIGA/BRAW_CLI\" status --short)"
     ],
     "deny": [],
     "ask": []

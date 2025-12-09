@@ -57,8 +57,8 @@ class STMapWarper {
     uint32_t get_output_size() const { return stmap_.width; }
 
     // 활성화 상태
-    void set_enabled(bool enabled) { enabled_ = enabled; }
-    bool is_enabled() const { return enabled_; }
+    void set_enabled(bool enabled) { is_enabled_ = enabled; }
+    bool is_enabled() const { return is_enabled_; }
 
   private:
     // Bilinear 샘플링으로 ST 좌표 가져오기
@@ -73,7 +73,7 @@ class STMapWarper {
                                float sx, float sy, uint8_t* out_rgb) const;
 
     STMapData stmap_;
-    bool enabled_{false};
+    bool is_enabled_{false};
 };
 
 }  // namespace braw

@@ -35,6 +35,9 @@ void log_hresult(const char* message, HRESULT hr) {
     std::cerr << message << " (HRESULT=0x" << std::hex << hr << std::dec << ")\n";
 }
 
+// 디코딩 타임아웃 (밀리초)
+constexpr int DECODE_TIMEOUT_MS = 30000;  // 30초
+
 // SDK ProcessClipCPU 패턴: 동기식 단일 프레임 처리용 콜백
 // 비동기 멀티프레임이 아닌, 한 프레임씩 동기 처리
 class SyncFrameCallback final : public IBlackmagicRawCallback {
@@ -53,7 +56,7 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
         result_buffer_ = buffer;
     }
 
-    bool wait_for_completion(int timeout_ms = 30000) {
+    bool wait_for_completion(int timeout_ms = DECODE_TIMEOUT_MS) {
         std::unique_lock<std::mutex> lock(mutex_);
         return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
                            [this] { return completed_; });
@@ -447,7 +450,7 @@ bool BrawDecoder::decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, St
     }
 
     // 콜백 완료 대기
-    if (!impl_->callback.wait_for_completion(30000)) {
+    if (!impl_->callback.wait_for_completion(DECODE_TIMEOUT_MS)) {
         std::cerr << "프레임 디코딩 타임아웃\n";
         return false;
     }

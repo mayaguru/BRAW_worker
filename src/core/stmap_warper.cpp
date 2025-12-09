@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 
 namespace braw {
 
@@ -84,7 +85,12 @@ bool STMapWarper::load_stmap(const std::filesystem::path& exr_path) {
         save_cache(cache_path);
 
         return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] STMAP load failed: " << e.what() << std::endl;
+        stmap_ = {};
+        return false;
     } catch (...) {
+        std::cerr << "[ERROR] STMAP load failed: unknown error" << std::endl;
         stmap_ = {};
         return false;
     }
@@ -241,7 +247,7 @@ void STMapWarper::sample_source_rgb888(const uint8_t* src_data, uint32_t width, 
 
 void STMapWarper::apply_warp(const float* src_data, float* dst_data,
                               uint32_t width, uint32_t height) const {
-    if (!enabled_ || !stmap_.is_valid()) {
+    if (!is_enabled_ || !stmap_.is_valid()) {
         // 워핑 비활성화 시 복사만
         std::memcpy(dst_data, src_data, width * height * 3 * sizeof(float));
         return;
@@ -274,7 +280,7 @@ void STMapWarper::apply_warp(const float* src_data, float* dst_data,
 
 void STMapWarper::apply_warp_rgb888(const uint8_t* src_data, uint8_t* dst_data,
                                      uint32_t width, uint32_t height) const {
-    if (!enabled_ || !stmap_.is_valid()) {
+    if (!is_enabled_ || !stmap_.is_valid()) {
         std::memcpy(dst_data, src_data, width * height * 3);
         return;
     }
@@ -303,7 +309,7 @@ void STMapWarper::apply_warp_rgb888(const uint8_t* src_data, uint8_t* dst_data,
 
 void STMapWarper::apply_warp_rgb888_square(const uint8_t* src_data, uint32_t src_width, uint32_t src_height,
                                             uint8_t* dst_data, uint32_t out_size) const {
-    if (!enabled_ || !stmap_.is_valid()) {
+    if (!is_enabled_ || !stmap_.is_valid()) {
         // 비활성화 시 중앙 크롭하여 정사각형으로 복사
         const uint32_t offset_x = (src_width - out_size) / 2;
         const uint32_t offset_y = (src_height - out_size) / 2;
@@ -339,7 +345,7 @@ void STMapWarper::apply_warp_rgb888_square(const uint8_t* src_data, uint32_t src
 
 void STMapWarper::apply_warp_float_square(const float* src_data, uint32_t src_width, uint32_t src_height,
                                            float* dst_data, uint32_t out_size) const {
-    if (!enabled_ || !stmap_.is_valid()) {
+    if (!is_enabled_ || !stmap_.is_valid()) {
         // 비활성화 시 중앙 크롭하여 정사각형으로 복사
         const uint32_t offset_x = (src_width - out_size) / 2;
         const uint32_t offset_y = (src_height - out_size) / 2;
