@@ -1,6 +1,7 @@
 add_library(braw_core STATIC
     braw_decoder.cpp
     frame_buffer.cpp
+    stmap_warper.cpp
 )
 
 target_include_directories(braw_core
@@ -8,6 +9,10 @@ target_include_directories(braw_core
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_SOURCE_DIR}/third_party
 )
+
+# OpenEXR for STMAP loading
+find_package(OpenEXR CONFIG REQUIRED)
+target_link_libraries(braw_core PUBLIC OpenEXR::OpenEXR)
 
 if (BRAW_ENABLE_SDK AND BRAW_SDK_FOUND)
     target_compile_definitions(braw_core PUBLIC BRAW_SDK_AVAILABLE=1)

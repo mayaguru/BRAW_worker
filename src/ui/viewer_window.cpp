@@ -23,7 +23,9 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
+#include <vector>
 
 #include "export/exr_writer.h"
 #include "export/image_writer.h"
@@ -47,8 +49,8 @@ std::filesystem::path build_stereo_path(const std::filesystem::path& base, std::
 // DecodeThread 구현
 // ============================================================================
 
-DecodeThread::DecodeThread(braw::BrawDecoder& decoder, QObject* parent)
-    : QThread(parent), decoder_(decoder) {}
+DecodeThread::DecodeThread(braw::BrawDecoder& decoder, braw::STMapWarper& stmap_warper, QObject* parent)
+    : QThread(parent), decoder_(decoder), stmap_warper_(stmap_warper) {}
 
 DecodeThread::~DecodeThread() {
     stop_decoding();
@@ -184,6 +186,37 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
             }
         }
 
+        // STMAP 워핑 적용
+        if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
+            QImage warped_left(single_width, out_height, QImage::Format_RGB888);
+            QImage warped_right(single_width, out_height, QImage::Format_RGB888);
+
+            // 좌안 워핑
+            std::vector<uint8_t> left_rgb(single_width * out_height * 3);
+            for (uint32_t y = 0; y < out_height; ++y) {
+                const auto* src = sbs_image.scanLine(static_cast<int>(y));
+                std::memcpy(&left_rgb[y * single_width * 3], src, single_width * 3);
+            }
+            std::vector<uint8_t> warped_left_rgb(single_width * out_height * 3);
+            stmap_warper_.apply_warp_rgb888(left_rgb.data(), warped_left_rgb.data(), single_width, out_height);
+
+            // 우안 워핑
+            std::vector<uint8_t> right_rgb(single_width * out_height * 3);
+            for (uint32_t y = 0; y < out_height; ++y) {
+                const auto* src = sbs_image.scanLine(static_cast<int>(y)) + single_width * 3;
+                std::memcpy(&right_rgb[y * single_width * 3], src, single_width * 3);
+            }
+            std::vector<uint8_t> warped_right_rgb(single_width * out_height * 3);
+            stmap_warper_.apply_warp_rgb888(right_rgb.data(), warped_right_rgb.data(), single_width, out_height);
+
+            // SBS 이미지 재조립
+            for (uint32_t y = 0; y < out_height; ++y) {
+                auto* dst = sbs_image.scanLine(static_cast<int>(y));
+                std::memcpy(dst, &warped_left_rgb[y * single_width * 3], single_width * 3);
+                std::memcpy(dst + single_width * 3, &warped_right_rgb[y * single_width * 3], single_width * 3);
+            }
+        }
+
         return sbs_image;
     } else {
         // 단안 모드: 좌안(0) 또는 우안(1)
@@ -215,6 +248,23 @@ QImage DecodeThread::decode_frame_to_image(uint32_t frame_index) {
                 *scan++ = clamp_to_byte(data[idx]);
                 *scan++ = clamp_to_byte(data[idx + 1]);
                 *scan++ = clamp_to_byte(data[idx + 2]);
+            }
+        }
+
+        // STMAP 워핑 적용
+        if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
+            std::vector<uint8_t> src_rgb(out_width * out_height * 3);
+            for (uint32_t y = 0; y < out_height; ++y) {
+                const auto* src = image.scanLine(static_cast<int>(y));
+                std::memcpy(&src_rgb[y * out_width * 3], src, out_width * 3);
+            }
+
+            std::vector<uint8_t> warped_rgb(out_width * out_height * 3);
+            stmap_warper_.apply_warp_rgb888(src_rgb.data(), warped_rgb.data(), out_width, out_height);
+
+            for (uint32_t y = 0; y < out_height; ++y) {
+                auto* dst = image.scanLine(static_cast<int>(y));
+                std::memcpy(dst, &warped_rgb[y * out_width * 3], out_width * 3);
             }
         }
 
@@ -285,6 +335,14 @@ MainWindow::MainWindow(QWidget* parent)
 
     controls->addSpacing(20);
 
+    // STMAP 왜곡 보정 버튼
+    stmap_button_ = new QPushButton(tr("왜곡보정 [W]"), this);
+    stmap_button_->setCheckable(true);
+    stmap_button_->setToolTip(tr("STMAP 왜곡 보정 토글 (W)"));
+    controls->addWidget(stmap_button_);
+
+    controls->addSpacing(20);
+
     export_button_ = new QPushButton(tr("내보내기"), this);
     export_button_->setEnabled(false);
     controls->addWidget(export_button_);
@@ -306,7 +364,7 @@ MainWindow::MainWindow(QWidget* parent)
     playback_timer_ = new QTimer(this);
 
     // 디코딩 스레드 생성
-    decode_thread_ = new DecodeThread(decoder_, this);
+    decode_thread_ = new DecodeThread(decoder_, stmap_warper_, this);
 
     // 시그널 연결
     connect(open_button_, &QPushButton::clicked, this, &MainWindow::handle_open_clip);
@@ -330,6 +388,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(left_button_, &QPushButton::clicked, this, [this]() { set_stereo_view(0); });
     connect(right_button_, &QPushButton::clicked, this, [this]() { set_stereo_view(1); });
     connect(sbs_button_, &QPushButton::clicked, this, [this]() { set_stereo_view(2); });
+
+    // STMAP 버튼 연결
+    connect(stmap_button_, &QPushButton::clicked, this, &MainWindow::toggle_stmap);
+
+    // STMAP 로드 (4K 버전 - 2K 프리뷰에 적합)
+    load_stmap();
 }
 
 MainWindow::~MainWindow() {
@@ -715,7 +779,6 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
     const uint32_t out_width = single_width * 2;        // 전체 SBS 너비 (2배)
     const uint32_t out_height = left.height / scale;
 
-    QImage sbs_image(out_width, out_height, QImage::Format_RGB888);
     const auto left_data = left.as_span();
     const auto right_data = right.as_span();
 
@@ -724,27 +787,49 @@ QImage MainWindow::create_sbs_image(const braw::FrameBuffer& left, const braw::F
         return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
     };
 
+    // 각 눈 별로 다운샘플링
+    QImage left_image(single_width, out_height, QImage::Format_RGB888);
+    QImage right_image(single_width, out_height, QImage::Format_RGB888);
+
     for (uint32_t y = 0; y < out_height; ++y) {
-        auto* scan = sbs_image.scanLine(static_cast<int>(y));
+        auto* left_scan = left_image.scanLine(static_cast<int>(y));
+        auto* right_scan = right_image.scanLine(static_cast<int>(y));
         const uint32_t src_y = y * scale;
 
-        // 좌측: 좌안 (원본 비율)
         for (uint32_t x = 0; x < single_width; ++x) {
             const uint32_t src_x = x * scale;
-            const size_t idx = (src_y * left.width + src_x) * 3;
-            *scan++ = clamp_to_byte(left_data[idx]);
-            *scan++ = clamp_to_byte(left_data[idx + 1]);
-            *scan++ = clamp_to_byte(left_data[idx + 2]);
-        }
+            const size_t left_idx = (src_y * left.width + src_x) * 3;
+            const size_t right_idx = (src_y * right.width + src_x) * 3;
 
-        // 우측: 우안 (원본 비율)
-        for (uint32_t x = 0; x < single_width; ++x) {
-            const uint32_t src_x = x * scale;
-            const size_t idx = (src_y * right.width + src_x) * 3;
-            *scan++ = clamp_to_byte(right_data[idx]);
-            *scan++ = clamp_to_byte(right_data[idx + 1]);
-            *scan++ = clamp_to_byte(right_data[idx + 2]);
+            *left_scan++ = clamp_to_byte(left_data[left_idx]);
+            *left_scan++ = clamp_to_byte(left_data[left_idx + 1]);
+            *left_scan++ = clamp_to_byte(left_data[left_idx + 2]);
+
+            *right_scan++ = clamp_to_byte(right_data[right_idx]);
+            *right_scan++ = clamp_to_byte(right_data[right_idx + 1]);
+            *right_scan++ = clamp_to_byte(right_data[right_idx + 2]);
         }
+    }
+
+    // STMAP 워핑 적용 (각 눈에 개별 적용)
+    if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
+        QImage left_warped(single_width, out_height, QImage::Format_RGB888);
+        QImage right_warped(single_width, out_height, QImage::Format_RGB888);
+        stmap_warper_.apply_warp_rgb888(left_image.bits(), left_warped.bits(), single_width, out_height);
+        stmap_warper_.apply_warp_rgb888(right_image.bits(), right_warped.bits(), single_width, out_height);
+        left_image = left_warped;
+        right_image = right_warped;
+    }
+
+    // SBS로 합치기
+    QImage sbs_image(out_width, out_height, QImage::Format_RGB888);
+    for (uint32_t y = 0; y < out_height; ++y) {
+        auto* sbs_scan = sbs_image.scanLine(static_cast<int>(y));
+        const auto* left_scan = left_image.constScanLine(static_cast<int>(y));
+        const auto* right_scan = right_image.constScanLine(static_cast<int>(y));
+
+        std::memcpy(sbs_scan, left_scan, single_width * 3);
+        std::memcpy(sbs_scan + single_width * 3, right_scan, single_width * 3);
     }
 
     return sbs_image;
@@ -768,6 +853,7 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
         return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
     };
 
+    // 다운샘플링
     for (uint32_t y = 0; y < out_height; ++y) {
         auto* scan = image.scanLine(static_cast<int>(y));
         const uint32_t src_y = y * scale;
@@ -781,6 +867,14 @@ QImage MainWindow::convert_to_qimage(const braw::FrameBuffer& buffer) const {
             *scan++ = clamp_to_byte(data[idx + 2]);
         }
     }
+
+    // STMAP 워핑 적용
+    if (stmap_warper_.is_enabled() && stmap_warper_.is_loaded()) {
+        QImage warped(out_width, out_height, QImage::Format_RGB888);
+        stmap_warper_.apply_warp_rgb888(image.bits(), warped.bits(), out_width, out_height);
+        return warped;
+    }
+
     return image;
 }
 
@@ -899,8 +993,53 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             }
             break;
 
+        case Qt::Key_W:
+            // STMAP 왜곡 보정 토글
+            toggle_stmap();
+            break;
+
         default:
             QMainWindow::keyPressEvent(event);
             break;
+    }
+}
+
+void MainWindow::toggle_stmap() {
+    if (!stmap_warper_.is_loaded()) {
+        status_label_->setText(tr("STMAP이 로드되지 않았습니다."));
+        stmap_button_->setChecked(false);
+        return;
+    }
+
+    const bool enabled = !stmap_warper_.is_enabled();
+    stmap_warper_.set_enabled(enabled);
+    stmap_button_->setChecked(enabled);
+
+    if (enabled) {
+        status_label_->setText(tr("왜곡 보정 활성화 (%1x%2)")
+            .arg(stmap_warper_.map_width())
+            .arg(stmap_warper_.map_height()));
+    } else {
+        status_label_->setText(tr("왜곡 보정 비활성화"));
+    }
+
+    // 현재 프레임 다시 로드
+    if (has_clip_) {
+        load_frame(current_frame_);
+    }
+}
+
+void MainWindow::load_stmap() {
+    // STMAP 폴더에서 4K 맵 로드 (2K 프리뷰용)
+    const std::filesystem::path stmap_path = "P:/00-GIGA/BRAW_CLI/STMAP/AVP_STmap_4k.exr";
+
+    if (stmap_warper_.load_stmap(stmap_path)) {
+        status_label_->setText(tr("STMAP 로드 완료 (%1x%2)")
+            .arg(stmap_warper_.map_width())
+            .arg(stmap_warper_.map_height()));
+        stmap_button_->setEnabled(true);
+    } else {
+        status_label_->setText(tr("STMAP 로드 실패"));
+        stmap_button_->setEnabled(false);
     }
 }

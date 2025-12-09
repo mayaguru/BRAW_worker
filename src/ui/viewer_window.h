@@ -13,6 +13,7 @@
 #include <queue>
 
 #include "core/braw_decoder.h"
+#include "core/stmap_warper.h"
 
 class QLabel;
 class QPushButton;
@@ -26,7 +27,7 @@ class DecodeThread : public QThread {
     Q_OBJECT
 
   public:
-    explicit DecodeThread(braw::BrawDecoder& decoder, QObject* parent = nullptr);
+    explicit DecodeThread(braw::BrawDecoder& decoder, braw::STMapWarper& stmap_warper, QObject* parent = nullptr);
     ~DecodeThread() override;
 
     void start_decoding(uint32_t start_frame, uint32_t frame_count, int stereo_view);
@@ -45,6 +46,7 @@ class DecodeThread : public QThread {
     QImage decode_frame_to_image(uint32_t frame_index);
 
     braw::BrawDecoder& decoder_;
+    braw::STMapWarper& stmap_warper_;
     braw::FrameBuffer buffer_left_;
     braw::FrameBuffer buffer_right_;
 
@@ -88,8 +90,11 @@ class MainWindow : public QMainWindow {
     void dropEvent(QDropEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void set_stereo_view(int view);  // 0=left, 1=right, 2=sbs
+    void toggle_stmap();
+    void load_stmap();
 
     braw::BrawDecoder decoder_;
+    braw::STMapWarper stmap_warper_;
     braw::FrameBuffer frame_buffer_left_;
     braw::FrameBuffer frame_buffer_right_;
     QImage last_image_;
@@ -108,6 +113,7 @@ class MainWindow : public QMainWindow {
     QPushButton* left_button_{nullptr};
     QPushButton* right_button_{nullptr};
     QPushButton* sbs_button_{nullptr};
+    QPushButton* stmap_button_{nullptr};
 
     uint32_t current_frame_{0};
     bool is_playing_{false};
