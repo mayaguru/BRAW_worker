@@ -28,3 +28,7 @@ braw_batch_ui/braw_batch_ui/__pycache__/farm_core.cpython-312.pyc
 개발중 폴더_테스트용.txt
 build2/*
 settings.local.json
+farm.db
+farm.db-shm
+farm.db-wal
+braw_batch_ui/run_farm_v2.bat - 바로 가기.lnk

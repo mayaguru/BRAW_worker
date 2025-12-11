@@ -96,7 +96,12 @@
       "Bash(python patch_job_status.py:*)",
       "Bash(python patch_filter_excluded.py:*)",
       "Bash(python patch_ui_exclude.py:*)",
-      "Bash(python patch_delete_batch.py:*)"
+      "Bash(python patch_delete_batch.py:*)",
+      "Bash(python patch_ui_v2.py:*)",
+      "Bash(python patch_core_v2.py:*)",
+      "Bash(python patch_db.py:*)",
+      "Bash(python patch_window_state.py:*)",
+      "Bash(python apply_clip_info.py:*)"
     ],
     "deny": [],
     "ask": []
