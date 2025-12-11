@@ -1070,37 +1070,35 @@ class FarmUIV2(QMainWindow):
             event.ignore()
 
     def add_file_to_list(self, file_path: str):
-        """파일 목록에 추가 (중복 체크)"""
+        """파일 목록에 추가 (중복 체크, 프레임 정보 포함)"""
         # 중복 체크
         for i in range(self.file_list.count()):
             item = self.file_list.item(i)
             if item.data(Qt.UserRole) == file_path:
                 return  # 이미 있음
-        
-        item = QListWidgetItem(Path(file_path).name)
+
+        # 프레임 수 조회
+        frame_count = self.get_clip_frame_count(file_path)
+        clip_name = Path(file_path).name
+        if frame_count > 0:
+            display_text = f"{clip_name} (0-{frame_count - 1})"
+            self.clip_frame_cache[file_path] = frame_count
+        else:
+            display_text = f"{clip_name} (프레임 정보 없음)"
+            self.clip_frame_cache[file_path] = 0
+
+        item = QListWidgetItem(display_text)
         item.setData(Qt.UserRole, file_path)
         item.setToolTip(file_path)
         self.file_list.addItem(item)
 
     def add_files(self):
-        """파일 추가 - 프레임 정보 포함"""
+        """파일 추가 버튼"""
         files, _ = QFileDialog.getOpenFileNames(
             self, "BRAW 파일 선택", "", "BRAW Files (*.braw)"
         )
         for f in files:
-            # 프레임 수 조회
-            frame_count = self.get_clip_frame_count(f)
-            clip_name = Path(f).name
-            if frame_count > 0:
-                display_text = f"{clip_name} (0-{frame_count - 1})"
-                self.clip_frame_cache[f] = frame_count
-            else:
-                display_text = f"{clip_name} (프레임 정보 없음)"
-                self.clip_frame_cache[f] = 0
-
-            item = QListWidgetItem(display_text)
-            item.setData(Qt.UserRole, f)  # 실제 경로 저장
-            self.file_list.addItem(item)
+            self.add_file_to_list(f)
 
         # 첫 파일 선택
         if self.file_list.count() > 0 and not self.file_list.currentItem():
