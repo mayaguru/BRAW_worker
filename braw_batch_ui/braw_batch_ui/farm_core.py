@@ -209,7 +209,7 @@ class RenderJob:
         self.format = "exr"
         self.separate_folders = False
         self.use_aces = True  # ACES 색공간 변환 사용 여부
-        self.color_input_space = "Linear BMD WideGamut Gen5"  # 입력 색공간
+        self.color_input_space = "BMDFilm WideGamut Gen5"  # 입력 색공간
         self.color_output_space = "ACEScg"  # 출력 색공간
         self.use_stmap = False  # STMAP 왜곡 보정 사용 여부
         self.stmap_path = ""  # STMAP EXR 파일 경로
@@ -248,7 +248,7 @@ class RenderJob:
         job.format = data["format"]
         job.separate_folders = data["separate_folders"]
         job.use_aces = data.get("use_aces", True)  # 기본값 True
-        job.color_input_space = data.get("color_input_space", "Linear BMD WideGamut Gen5")
+        job.color_input_space = data.get("color_input_space", "BMDFilm WideGamut Gen5")
         job.color_output_space = data.get("color_output_space", "ACEScg")
         job.use_stmap = data.get("use_stmap", False)  # 기본값 False
         job.stmap_path = data.get("stmap_path", "")
