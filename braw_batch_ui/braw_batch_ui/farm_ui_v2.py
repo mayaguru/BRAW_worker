@@ -1731,20 +1731,17 @@ class FarmUIV2(QMainWindow):
         for folder in scan_folders:
             self.append_worker_log(f"🔍 SeqChecker 스캔: {folder}")
             try:
+                # 리포트 파일 경로 지정
+                report_path = folder.parent / f"{folder.name}_report.txt"
+
                 result = subprocess.run(
-                    [str(seqchecker_path), str(folder), "-q"],
+                    [str(seqchecker_path), str(folder), "-q", "-o", str(report_path)],
                     capture_output=True,
                     text=True,
                     timeout=300  # 5분 타임아웃
                 )
 
-                # 리포트 파일 찾기
-                report_files = list(folder.parent.glob(f"{folder.name}*_report.txt"))
-                if not report_files:
-                    report_files = list(folder.glob("*_report.txt"))
-
-                if report_files:
-                    report_path = report_files[0]
+                if report_path.exists():
                     error_frames = self.parse_seqchecker_report(report_path)
                     if error_frames:
                         all_error_frames.update(error_frames)
@@ -1753,7 +1750,9 @@ class FarmUIV2(QMainWindow):
                         self.append_worker_log(f"  ✅ 오류 없음")
                 else:
                     if result.returncode != 0:
-                        self.append_worker_log(f"  ⚠️ SeqChecker 오류 (리포트 없음)")
+                        self.append_worker_log(f"  ⚠️ SeqChecker 오류 (code={result.returncode})")
+                    else:
+                        self.append_worker_log(f"  ✅ 오류 없음")
 
             except subprocess.TimeoutExpired:
                 self.append_worker_log(f"  ⚠️ SeqChecker 타임아웃")
