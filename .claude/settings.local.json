@@ -86,7 +86,8 @@
       "Bash(cmd /c \"\"\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\Tools\\VsDevCmd.bat\"\" && cd /d p:\\00-GIGA\\BRAW_CLI && cmake -S . -B build2 -G \"\"Visual Studio 17 2022\"\" -A x64\")",
       "Bash(python -m py_compile:*)",
       "Bash(python patch_farm_ui.py:*)",
-      "Bash(python apply_patches.py:*)"
+      "Bash(python apply_patches.py:*)",
+      "Bash(python patch_split_job.py:*)"
     ],
     "deny": [],
     "ask": []

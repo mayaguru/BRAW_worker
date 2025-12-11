@@ -1209,10 +1209,18 @@ class FarmUI(QMainWindow):
         """)
         file_layout.addWidget(self.file_list_widget)
 
-        # 파일 카운터
+        # 파일 카운터 + 지우기 버튼
+        file_footer_layout = QHBoxLayout()
         self.file_count_label = QLabel("선택된 파일: 0개")
         self.file_count_label.setStyleSheet("color: #4db8c4; font-weight: bold; padding: 5px;")
-        file_layout.addWidget(self.file_count_label)
+        file_footer_layout.addWidget(self.file_count_label)
+        file_footer_layout.addStretch()
+        clear_list_btn = QPushButton("🗑️ 전체 지우기")
+        clear_list_btn.setMaximumWidth(100)
+        clear_list_btn.setToolTip("선택된 파일 목록을 모두 지웁니다")
+        clear_list_btn.clicked.connect(self.clear_file_list)
+        file_footer_layout.addWidget(clear_list_btn)
+        file_layout.addLayout(file_footer_layout)
 
         layout.addWidget(file_area)
 
@@ -1338,6 +1346,28 @@ class FarmUI(QMainWindow):
         stmap_layout.addWidget(self.stmap_input)
         stmap_layout.addWidget(stmap_browse_btn)
         layout.addLayout(stmap_layout)
+
+        # 작업 분할 옵션
+        split_layout = QHBoxLayout()
+        self.split_job_check = QCheckBox("작업 분할")
+        self.split_job_check.setChecked(False)
+        self.split_job_check.setToolTip(
+            "긴 클립을 여러 작업으로 분할합니다\n"
+            "예: 1000프레임 → 500프레임 x 2개 작업\n"
+            "여러 PC가 같은 클립을 동시에 처리 가능"
+        )
+        self.split_job_check.stateChanged.connect(self.on_split_job_changed)
+        self.split_frame_spin = QSpinBox()
+        self.split_frame_spin.setRange(100, 5000)
+        self.split_frame_spin.setValue(500)
+        self.split_frame_spin.setSingleStep(100)
+        self.split_frame_spin.setEnabled(False)
+        self.split_frame_spin.setToolTip("작업당 프레임 수")
+        split_layout.addWidget(self.split_job_check)
+        split_layout.addWidget(self.split_frame_spin)
+        split_layout.addWidget(QLabel("프레임/작업"))
+        split_layout.addStretch()
+        layout.addLayout(split_layout)
 
         # 제출 버튼
         submit_btn = QPushButton("✅ 작업 제출")
@@ -1687,6 +1717,22 @@ class FarmUI(QMainWindow):
             else:
                 self.current_selected_file = None
 
+    def clear_file_list(self):
+        """파일 목록 전체 지우기"""
+        self.file_list_widget.clear()
+        self.selected_files.clear()
+        self.file_frame_ranges.clear()
+        self.current_selected_file = None
+        self.update_file_count()
+
+    def clear_file_list(self):
+        """파일 목록 전체 지우기"""
+        self.file_list_widget.clear()
+        self.selected_files.clear()
+        self.file_frame_ranges.clear()
+        self.current_selected_file = None
+        self.update_file_count()
+
     def update_file_count(self):
         """파일 카운트 업데이트"""
         count = len(self.selected_files)
@@ -1847,6 +1893,10 @@ class FarmUI(QMainWindow):
             QMessageBox.warning(self, "경고", f"STMAP 파일을 찾을 수 없습니다:\n{stmap_path}")
             return
 
+        # 작업 분할 설정
+        split_enabled = self.split_job_check.isChecked()
+        split_size = self.split_frame_spin.value() if split_enabled else 0
+
         # 각 파일마다 작업 생성
         submitted_jobs = []
 
@@ -1867,26 +1917,43 @@ class FarmUI(QMainWindow):
             else:
                 job_output_dir = output_dir
 
-            # 작업 생성
-            timestamp = int(time.time() * 1000)  # 밀리초 단위로 고유성 보장
-            job = RenderJob(f"job_{timestamp}_{clip_name}")
-            job.clip_path = clip_path
-            job.output_dir = job_output_dir
-            job.start_frame = start_frame
-            job.end_frame = end_frame
-            job.eyes = eyes
-            job.format = format_type
-            job.separate_folders = separate_folders
-            job.use_aces = use_aces
-            job.color_input_space = settings.color_input_space
-            job.color_output_space = settings.color_output_space
-            job.use_stmap = use_stmap
-            job.stmap_path = stmap_path
+            # 프레임 범위 분할 (작업 분할 활성화 시)
+            frame_ranges = []
+            if split_enabled and (end_frame - start_frame + 1) > split_size:
+                current = start_frame
+                while current <= end_frame:
+                    range_end = min(current + split_size - 1, end_frame)
+                    frame_ranges.append((current, range_end))
+                    current = range_end + 1
+            else:
+                frame_ranges.append((start_frame, end_frame))
 
-            # 제출
-            self.farm_manager.submit_job(job)
-            submitted_jobs.append(job.job_id)
-            time.sleep(0.01)  # 고유 ID 보장을 위한 작은 딜레이
+            # 각 범위별로 작업 생성
+            for idx, (range_start, range_end) in enumerate(frame_ranges):
+                timestamp = int(time.time() * 1000)
+                if len(frame_ranges) > 1:
+                    job_id = f"job_{timestamp}_{clip_name}_part{idx+1}"
+                else:
+                    job_id = f"job_{timestamp}_{clip_name}"
+
+                job = RenderJob(job_id)
+                job.clip_path = clip_path
+                job.output_dir = job_output_dir
+                job.start_frame = range_start
+                job.end_frame = range_end
+                job.eyes = eyes
+                job.format = format_type
+                job.separate_folders = separate_folders
+                job.use_aces = use_aces
+                job.color_input_space = settings.color_input_space
+                job.color_output_space = settings.color_output_space
+                job.use_stmap = use_stmap
+                job.stmap_path = stmap_path
+
+                # 제출
+                self.farm_manager.submit_job(job)
+                submitted_jobs.append(job.job_id)
+                time.sleep(0.01)
 
         # 결과 메시지
         total = len(submitted_jobs)
@@ -2025,6 +2092,10 @@ class FarmUI(QMainWindow):
     def on_stmap_changed(self, state):
         """STMAP 체크박스 상태 변경 시"""
         self.stmap_input.setEnabled(state == Qt.Checked)
+
+    def on_split_job_changed(self, state):
+        """작업 분할 체크박스 변경 시"""
+        self.split_frame_spin.setEnabled(state == Qt.Checked)
 
     def show_color_settings(self):
         """색공간 설정 다이얼로그 표시"""
