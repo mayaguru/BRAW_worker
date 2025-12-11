@@ -520,9 +520,9 @@ class WorkerThreadV2(QThread):
                         total_done = total_progress['completed'] + completed
                         total_all = total_progress['total']
                         total_pct = (total_done / total_all * 100) if total_all > 0 else 0
-                        self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.0f}%) | 전체: {total_done}/{total_all} ({total_pct:.0f}%)")
+                        self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.2f}%) | 전체: {total_done}/{total_all} ({total_pct:.2f}%)")
                     except:
-                        self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.0f}%)")
+                        self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.2f}%)")
 
                 if completed >= frame_count:
                     break
@@ -746,12 +746,19 @@ class FarmUIV2(QMainWindow):
         group = QGroupBox("📤 작업 제출")
         layout = QVBoxLayout(group)
 
-        # 파일 선택
+        # 파일 선택 (드래그앤드롭 지원)
         file_layout = QHBoxLayout()
         self.file_list = QListWidget()
         self.file_list.setMinimumHeight(250)
+        self.file_list.setAcceptDrops(True)
+        self.file_list.setDragDropMode(QListWidget.DropOnly)
         file_layout.addWidget(self.file_list)
         self.file_list.currentItemChanged.connect(self.on_file_selected)
+
+        # 드래그앤드롭 이벤트
+        self.file_list.dragEnterEvent = self.file_list_drag_enter
+        self.file_list.dragMoveEvent = self.file_list_drag_move
+        self.file_list.dropEvent = self.file_list_drop
         self.clip_frame_cache = {}  # 클립별 프레임 수 캐시
 
         file_btn_layout = QVBoxLayout()
@@ -910,14 +917,14 @@ class FarmUIV2(QMainWindow):
         layout = QVBoxLayout(group)
 
         self.jobs_table = QTableWidget()
-        self.jobs_table.setColumnCount(11)
+        self.jobs_table.setColumnCount(12)
         self.jobs_table.setHorizontalHeaderLabels([
-            "작업 ID", "클립", "프레임", "풀", "상태", "L", "R", "SBS", "진행률", "우선순위", "생성"
+            "작업 ID", "클립", "프레임", "풀", "상태", "L", "R", "SBS", "진행률", "우선순위", "생성", "경과"
         ])
         self.jobs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.jobs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.jobs_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        for i in [3, 4, 5, 6, 7, 8, 9, 10]:
+        for i in [3, 4, 5, 6, 7, 8, 9, 10, 11]:
             self.jobs_table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
         self.jobs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.jobs_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1026,6 +1033,55 @@ class FarmUIV2(QMainWindow):
             self.separate_check.setEnabled(False)
         else:
             self.separate_check.setEnabled(True)
+
+
+    def file_list_drag_enter(self, event):
+        """드래그 진입"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def file_list_drag_move(self, event):
+        """드래그 이동"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def file_list_drop(self, event):
+        """파일 드롭"""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            added = 0
+            for url in urls:
+                file_path = url.toLocalFile()
+                if file_path.lower().endswith('.braw'):
+                    self.add_file_to_list(file_path)
+                    added += 1
+                elif Path(file_path).is_dir():
+                    # 폴더면 내부 .braw 파일 검색
+                    for braw_file in Path(file_path).rglob("*.braw"):
+                        self.add_file_to_list(str(braw_file))
+                        added += 1
+            if added > 0:
+                self.append_worker_log(f"📁 {added}개 파일 추가됨")
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def add_file_to_list(self, file_path: str):
+        """파일 목록에 추가 (중복 체크)"""
+        # 중복 체크
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item.data(Qt.UserRole) == file_path:
+                return  # 이미 있음
+        
+        item = QListWidgetItem(Path(file_path).name)
+        item.setData(Qt.UserRole, file_path)
+        item.setToolTip(file_path)
+        self.file_list.addItem(item)
 
     def add_files(self):
         """파일 추가 - 프레임 정보 포함"""
@@ -1332,7 +1388,7 @@ class FarmUIV2(QMainWindow):
 
             # 전체 진행률
             pct = (completed / total * 100) if total > 0 else 0
-            self.jobs_table.setItem(row, 8, QTableWidgetItem(f"{completed}/{total} ({pct:.1f}%)"))
+            self.jobs_table.setItem(row, 8, QTableWidgetItem(f"{completed}/{total} ({pct:.2f}%)"))
 
             # 우선순위
             self.jobs_table.setItem(row, 9, QTableWidgetItem(str(job.priority)))
@@ -1341,6 +1397,19 @@ class FarmUIV2(QMainWindow):
             self.jobs_table.setItem(row, 10, QTableWidgetItem(
                 job.created_at.strftime("%m/%d %H:%M")
             ))
+
+            # 경과 시간 (완료된 프레임이 있으면 시작된 것으로 간주)
+            if completed > 0 or status == 'in_progress':
+                elapsed = datetime.now() - job.created_at
+                hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                if hours > 0:
+                    elapsed_str = f"{hours}시간 {minutes}분"
+                else:
+                    elapsed_str = f"{minutes}분 {seconds}초"
+                self.jobs_table.setItem(row, 11, QTableWidgetItem(elapsed_str))
+            else:
+                self.jobs_table.setItem(row, 11, QTableWidgetItem("-"))
 
         # 워커 현황 업데이트
         self.refresh_workers()
@@ -1584,7 +1653,7 @@ class FarmUIV2(QMainWindow):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(completed)
         pct = (completed / total * 100) if total > 0 else 0
-        self.stats_label.setText(f"진행: {completed}/{total} ({pct:.1f}%)")
+        self.stats_label.setText(f"진행: {completed}/{total} ({pct:.2f}%)")
 
     def append_worker_log(self, text: str):
         """로그 추가"""

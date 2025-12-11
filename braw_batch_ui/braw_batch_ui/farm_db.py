@@ -337,13 +337,16 @@ class FarmDatabase:
 
             total = sum(s['cnt'] for s in stats)
             completed = sum(s['cnt'] for s in stats if s['status'] == 'completed')
+            claimed = sum(s['cnt'] for s in stats if s['status'] == 'claimed')
 
-            # 상태 결정
+            # 상태 결정 (claimed도 진행중으로 간주)
             if job.status == JobStatus.EXCLUDED:
                 status = 'excluded'
+            elif job.status == JobStatus.PAUSED:
+                status = 'paused'
             elif completed >= total and total > 0:
                 status = 'completed'
-            elif completed > 0:
+            elif completed > 0 or claimed > 0:
                 status = 'in_progress'
             else:
                 status = 'pending'
