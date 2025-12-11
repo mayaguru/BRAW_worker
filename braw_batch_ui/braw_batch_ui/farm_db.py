@@ -104,14 +104,14 @@ class FarmDatabase:
         if not hasattr(self._local, 'conn') or self._local.conn is None:
             self._local.conn = sqlite3.connect(
                 str(self.db_path),
-                timeout=30.0,  # 락 대기 시간
-                isolation_level=None  # autocommit for WAL mode
+                timeout=60.0,  # 락 대기 시간 (네트워크용)
+                isolation_level=None  # autocommit
             )
             self._local.conn.row_factory = sqlite3.Row
-            # WAL 모드 - 동시 읽기/쓰기 지원
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA synchronous=NORMAL")
-            self._local.conn.execute("PRAGMA cache_size=10000")
+            # DELETE 모드 - 네트워크 드라이브 호환
+            self._local.conn.execute("PRAGMA journal_mode=DELETE")
+            self._local.conn.execute("PRAGMA synchronous=FULL")
+            self._local.conn.execute("PRAGMA busy_timeout=60000")
             self._local.conn.execute("PRAGMA temp_store=MEMORY")
         return self._local.conn
 

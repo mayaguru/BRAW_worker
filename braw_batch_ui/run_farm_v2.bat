@@ -2,8 +2,8 @@
 chcp 65001 >nul
 title BRAW Render Farm V2
 
-set BRAW_FARM_DB=P:\00-GIGA\BRAW_CLI\farm.db
-set BRAW_FARM_ROOT=P:\00-GIGA\BRAW_CLI
+set BRAW_FARM_DB=P:\99-Pipeline\Blackmagic\Braw_convert_Project\farm.db
+set BRAW_FARM_ROOT=P:\99-Pipeline\Blackmagic\Braw_convert_Project
 set BRAW_CLI_PATH=P:\00-GIGA\BRAW_CLI\build\bin\braw_cli.exe
 set UV_PROJECT_ENVIRONMENT=%LOCALAPPDATA%\braw_farm_v2\.venv
 set UV_LINK_MODE=copy

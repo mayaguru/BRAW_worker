@@ -1538,24 +1538,31 @@ class FarmUIV2(QMainWindow):
     def kill_braw_processes(self):
         """braw_cli 관련 프로세스 강제 종료"""
         import subprocess
-        try:
-            # braw_cli.exe 프로세스 종료
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "braw_cli.exe"],
-                capture_output=True, timeout=10
-            )
-            self.append_worker_log("  - braw_cli.exe 프로세스 종료됨")
-        except Exception as e:
-            self.append_worker_log(f"  - braw_cli 종료 오류: {e}")
+        import time
 
-        try:
-            # cli_cuda.exe 프로세스도 종료 (있을 경우)
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "cli_cuda.exe"],
-                capture_output=True, timeout=10
-            )
-        except:
-            pass
+        targets = ["braw_cli.exe", "cli_cuda.exe"]
+        killed_count = 0
+
+        for target in targets:
+            for attempt in range(3):  # 최대 3번 시도
+                try:
+                    result = subprocess.run(
+                        ["taskkill", "/F", "/IM", target],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        killed_count += 1
+                        self.append_worker_log(f"  - {target} 종료됨")
+                    elif "not found" in result.stderr.lower() or "찾을 수 없습니다" in result.stderr:
+                        break  # 프로세스 없음
+                    time.sleep(0.3)
+                except Exception as e:
+                    self.append_worker_log(f"  - {target} 종료 시도 {attempt+1} 실패: {e}")
+
+        if killed_count > 0:
+            self.append_worker_log(f"  - 총 {killed_count}개 프로세스 종료됨")
 
     def check_worker_stopped(self):
         """워커 종료 확인"""
