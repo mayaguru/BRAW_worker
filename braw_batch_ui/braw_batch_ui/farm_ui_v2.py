@@ -38,6 +38,9 @@ from .config import (
     CLIP_INFO_TIMEOUT_SEC,
     LOG_MAX_LINES,
     BATCH_CLAIM_TIMEOUT_SEC,
+    FRAME_BASE_TIMEOUT_SEC,
+    FRAME_PER_FRAME_TIMEOUT_SEC,
+    FRAME_SBS_MULTIPLIER,
 )
 
 
@@ -164,6 +167,7 @@ class PoolDialog(QDialog):
     def __init__(self, farm_manager: FarmManagerV2, parent=None):
         super().__init__(parent)
         self.farm_manager = farm_manager
+        self.parent_window = parent  # FarmUIV2 참조 저장
         self.setWindowTitle("풀 관리")
         self.setMinimumSize(500, 400)
         self.init_ui()
@@ -245,11 +249,11 @@ class PoolDialog(QDialog):
                 if self.farm_manager.create_pool(pool_id, name, desc, priority):
                     self.load_pools()
                 else:
-                    self.append_worker_log("⚠️ 풀 생성 실패 (ID 중복?)")
+                    QMessageBox.warning(self, "풀 생성 실패", "풀 생성에 실패했습니다. (ID 중복?)")
 
     def edit_pool(self):
         """풀 수정 (TODO)"""
-        self.append_worker_log("ℹ️ 풀 수정은 아직 구현되지 않았습니다.")
+        QMessageBox.information(self, "알림", "풀 수정은 아직 구현되지 않았습니다.")
 
     def delete_pool(self):
         """풀 삭제"""
@@ -259,13 +263,12 @@ class PoolDialog(QDialog):
 
         pool_id = selected.data(Qt.UserRole)
         if pool_id == 'default':
-            self.append_worker_log("⚠️ 기본 풀은 삭제할 수 없습니다.")
+            QMessageBox.warning(self, "삭제 불가", "기본 풀은 삭제할 수 없습니다.")
             return
 
         # 확인 없이 바로 삭제
         self.farm_manager.delete_pool(pool_id)
         self.load_pools()
-        self.append_worker_log(f"🗑️ 풀 삭제됨: {pool_id}")
 
 
 class PoolEditDialog(QDialog):
@@ -332,13 +335,11 @@ class WorkerThreadV2(QThread):
         """대기 중인 프레임 수 조회"""
         try:
             return self.farm_manager.db.get_pending_frame_count(self.farm_manager.current_pool_id)
-        except:
+        except Exception:
             return 9999  # 오류시 기본값 (제한 없음)
 
     def run(self):
         """워커 실행 - 병렬 처리"""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         self.is_running = True
         self.farm_manager.start()
 
@@ -522,7 +523,7 @@ class WorkerThreadV2(QThread):
                         total_all = total_progress['total']
                         total_pct = (total_done / total_all * 100) if total_all > 0 else 0
                         self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.2f}%) | 전체: {total_done}/{total_all} ({total_pct:.2f}%)")
-                    except:
+                    except Exception:
                         self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.2f}%)")
 
                 if completed >= frame_count:
@@ -534,10 +535,10 @@ class WorkerThreadV2(QThread):
         monitor_thread.start()
 
         try:
-            # 프레임당 60초 + 기본 300초 (SBS는 2배)
-            base_timeout = 300 + (frame_count * 60)
+            # 프레임당 타임아웃 + 기본 타임아웃 (SBS는 배수 적용)
+            base_timeout = FRAME_BASE_TIMEOUT_SEC + (frame_count * FRAME_PER_FRAME_TIMEOUT_SEC)
             if eye == "sbs":
-                base_timeout *= 2
+                base_timeout *= FRAME_SBS_MULTIPLIER
             timeout_sec = max(BATCH_CLAIM_TIMEOUT_SEC, base_timeout)
 
             result = subprocess.run(
@@ -1173,8 +1174,6 @@ class FarmUIV2(QMainWindow):
         if not input_text.strip():
             return []
 
-        import re
-
         # 다양한 하이픈/대시 문자를 일반 하이픈으로 정규화
         # 엔 대시, 엠 대시, 전각 하이픈, 마이너스, 틸드 등
         normalized = re.sub(r'[\u2013\u2014\uFF0D\u2010\u2011\u2012\u2015\u2212~]', '-', input_text)
@@ -1335,7 +1334,6 @@ class FarmUIV2(QMainWindow):
             )
             for line in result.stdout.split('\n'):
                 if 'frame' in line.lower() and 'count' in line.lower():
-                    import re
                     match = re.search(r'(\d+)', line)
                     if match:
                         return int(match.group(1))

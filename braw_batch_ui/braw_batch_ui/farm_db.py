@@ -17,6 +17,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .config import CLAIM_TIMEOUT_SEC, WORKER_TIMEOUT_SEC
+
 
 class JobStatus(Enum):
     """작업 상태"""
@@ -88,10 +90,6 @@ class Worker:
 
 class FarmDatabase:
     """렌더팜 데이터베이스 관리자"""
-
-    # 클레임 타임아웃 (초)
-    CLAIM_TIMEOUT_SEC = 180  # 3분
-    HEARTBEAT_TIMEOUT_SEC = 300  # 2분
 
     def __init__(self, db_path: str):
         self.db_path = Path(db_path)
@@ -432,7 +430,7 @@ class FarmDatabase:
             (job_id, start_frame, end_frame, eye) 또는 None
         """
         now = datetime.now().isoformat()
-        timeout = (datetime.now() - timedelta(seconds=self.CLAIM_TIMEOUT_SEC)).isoformat()
+        timeout = (datetime.now() - timedelta(seconds=CLAIM_TIMEOUT_SEC)).isoformat()
 
         with self.transaction() as conn:
             # 만료된 클레임 정리
@@ -563,7 +561,7 @@ class FarmDatabase:
     def get_active_workers(self) -> List[Worker]:
         """모든 워커 목록 (오프라인 포함, 24시간 이내)"""
         conn = self._get_connection()
-        timeout = (datetime.now() - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SEC)).isoformat()
+        timeout = (datetime.now() - timedelta(seconds=WORKER_TIMEOUT_SEC)).isoformat()
         day_ago = (datetime.now() - timedelta(hours=24)).isoformat()
 
         rows = conn.execute("""
@@ -618,7 +616,7 @@ class FarmDatabase:
     def get_workers_by_pool(self, pool_id: str) -> List[Worker]:
         """풀별 워커 목록"""
         conn = self._get_connection()
-        timeout = (datetime.now() - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SEC)).isoformat()
+        timeout = (datetime.now() - timedelta(seconds=WORKER_TIMEOUT_SEC)).isoformat()
 
         rows = conn.execute("""
             SELECT *,
@@ -641,7 +639,7 @@ class FarmDatabase:
     def get_all_workers(self) -> List[Worker]:
         """모든 워커 목록"""
         conn = self._get_connection()
-        timeout = (datetime.now() - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SEC)).isoformat()
+        timeout = (datetime.now() - timedelta(seconds=WORKER_TIMEOUT_SEC)).isoformat()
 
         rows = conn.execute("""
             SELECT *,
@@ -678,7 +676,7 @@ class FarmDatabase:
         """, (pool_id,)).fetchall()
 
         # 워커 통계
-        timeout = (datetime.now() - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SEC)).isoformat()
+        timeout = (datetime.now() - timedelta(seconds=WORKER_TIMEOUT_SEC)).isoformat()
         worker_stats = conn.execute("""
             SELECT
                 COUNT(*) as total,
@@ -701,7 +699,7 @@ class FarmDatabase:
 
     def cleanup_offline_workers(self):
         """오프라인 워커의 클레임 정리"""
-        timeout = (datetime.now() - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SEC)).isoformat()
+        timeout = (datetime.now() - timedelta(seconds=WORKER_TIMEOUT_SEC)).isoformat()
 
         with self.transaction() as conn:
             # 오프라인 워커 ID 수집

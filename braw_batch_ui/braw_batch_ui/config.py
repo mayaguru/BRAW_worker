@@ -48,6 +48,11 @@ FRAME_SEARCH_BATCH_SIZE = 50  # 한 번에 검색할 프레임 범위
 BATCH_FRAME_SIZE = 10  # 한 번에 처리할 프레임 수 (5프레임 단위 - 12워커 시 60프레임/1초)
 BATCH_CLAIM_TIMEOUT_SEC = 600  # 배치 클레임 타임아웃 (12워커 동시 실행 시 I/O 경쟁 고려, 10분)
 
+# 프레임 처리 타임아웃 설정
+FRAME_BASE_TIMEOUT_SEC = 300  # 기본 타임아웃 (5분)
+FRAME_PER_FRAME_TIMEOUT_SEC = 60  # 프레임당 추가 타임아웃 (1분)
+FRAME_SBS_MULTIPLIER = 2  # SBS 처리 시 타임아웃 배수
+
 # 네트워크 파일시스템 안정성
 NFS_WRITE_SYNC_DELAY = 0.01  # 쓰기 후 동기화 대기 (초)
 NFS_READ_RETRY_ON_EMPTY = True  # 빈 파일 읽기 시 재시도
@@ -181,13 +186,32 @@ class FarmSettings:
                 print(f"설정 저장 실패: {e}")
 
     def to_dict(self):
-        """딕셔너리로 변환"""
+        """딕셔너리로 변환 (모든 설정 포함)"""
         return {
             "farm_root": self.farm_root,
             "db_path": self.db_path,
             "cli_path": self.cli_path,
             "parallel_workers": self.parallel_workers,
-            "last_output_folder": self.last_output_folder
+            "max_retries": self.max_retries,
+            "last_output_folder": self.last_output_folder,
+            "ocio_config_path": self.ocio_config_path,
+            "color_input_space": self.color_input_space,
+            "color_output_space": self.color_output_space,
+            "color_presets": self.color_presets,
+            "last_preset": self.last_preset,
+            "render_left": self.render_left,
+            "render_right": self.render_right,
+            "render_sbs": self.render_sbs,
+            "render_format_exr": self.render_format_exr,
+            "render_clip_folder": self.render_clip_folder,
+            "render_separate_lr": self.render_separate_lr,
+            "render_use_aces": self.render_use_aces,
+            "render_use_stmap": self.render_use_stmap,
+            "stmap_path": self.stmap_path,
+            "batch_frame_size": self.batch_frame_size,
+            "seqchecker_path": self.seqchecker_path,
+            "seqchecker_auto_scan": self.seqchecker_auto_scan,
+            "seqchecker_auto_rerender": self.seqchecker_auto_rerender
         }
 
 
