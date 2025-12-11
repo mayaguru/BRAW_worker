@@ -243,11 +243,11 @@ class PoolDialog(QDialog):
                 if self.farm_manager.create_pool(pool_id, name, desc, priority):
                     self.load_pools()
                 else:
-                    QMessageBox.warning(self, "오류", "풀 생성 실패 (ID 중복?)")
+                    self.append_worker_log("⚠️ 풀 생성 실패 (ID 중복?)")
 
     def edit_pool(self):
         """풀 수정 (TODO)"""
-        QMessageBox.information(self, "알림", "풀 수정은 아직 구현되지 않았습니다.")
+        self.append_worker_log("ℹ️ 풀 수정은 아직 구현되지 않았습니다.")
 
     def delete_pool(self):
         """풀 삭제"""
@@ -257,19 +257,13 @@ class PoolDialog(QDialog):
 
         pool_id = selected.data(Qt.UserRole)
         if pool_id == 'default':
-            QMessageBox.warning(self, "오류", "기본 풀은 삭제할 수 없습니다.")
+            self.append_worker_log("⚠️ 기본 풀은 삭제할 수 없습니다.")
             return
 
-        reply = QMessageBox.question(
-            self, "풀 삭제",
-            f"풀 '{pool_id}'을(를) 삭제하시겠습니까?\n"
-            "해당 풀의 작업과 워커는 기본 풀로 이동됩니다.",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply == QMessageBox.Yes:
-            self.farm_manager.delete_pool(pool_id)
-            self.load_pools()
+        # 확인 없이 바로 삭제
+        self.farm_manager.delete_pool(pool_id)
+        self.load_pools()
+        self.append_worker_log(f"🗑️ 풀 삭제됨: {pool_id}")
 
 
 class PoolEditDialog(QDialog):
@@ -1013,10 +1007,7 @@ class FarmUIV2(QMainWindow):
             settings.db_path = new_path
             settings.save()
             self.db_label.setText(f"DB: {new_path}")
-            QMessageBox.information(
-                self, "DB 경로 변경",
-                f"DB 경로가 변경되었습니다:\n{new_path}\n\n프로그램을 재시작하면 적용됩니다."
-            )
+            self.append_worker_log(f"ℹ️ DB 경로 변경됨: {new_path} (재시작 필요)")
 
     def show_settings(self):
         """설정 다이얼로그"""
@@ -1217,12 +1208,12 @@ class FarmUIV2(QMainWindow):
     def submit_job(self):
         """작업 제출"""
         if self.file_list.count() == 0:
-            QMessageBox.warning(self, "오류", "파일을 선택하세요.")
+            self.append_worker_log("⚠️ 파일을 선택하세요.")
             return
 
         output_dir = self.output_input.text().strip()
         if not output_dir:
-            QMessageBox.warning(self, "오류", "출력 폴더를 선택하세요.")
+            self.append_worker_log("⚠️ 출력 폴더를 선택하세요.")
             return
 
         # 눈 선택
@@ -1235,7 +1226,7 @@ class FarmUIV2(QMainWindow):
             eyes.append("sbs")
 
         if not eyes:
-            QMessageBox.warning(self, "오류", "L, R, SBS 중 하나 이상 선택하세요.")
+            self.append_worker_log("⚠️ L, R, SBS 중 하나 이상 선택하세요.")
             return
 
         # 작업 제출
@@ -1323,7 +1314,7 @@ class FarmUIV2(QMainWindow):
             submitted += 1
 
         self.refresh_jobs()
-        QMessageBox.information(self, "완료", f"{submitted}개 작업이 제출되었습니다.")
+        self.append_worker_log(f"✅ {submitted}개 작업이 제출되었습니다.")
 
     def get_clip_frame_count(self, clip_path: str) -> int:
         """클립 프레임 수 조회"""
@@ -1510,21 +1501,12 @@ class FarmUIV2(QMainWindow):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(parent)))
                     self.append_worker_log(f"📂 상위 폴더 열기: {parent}")
                 else:
-                    QMessageBox.warning(self, "오류", f"폴더가 존재하지 않습니다:\n{output_path}")
+                    self.append_worker_log(f"⚠️ 폴더가 존재하지 않습니다: {output_path}")
         else:
-            QMessageBox.warning(self, "오류", f"작업을 찾을 수 없습니다: {job_id}")
+            self.append_worker_log(f"⚠️ 작업을 찾을 수 없습니다: {job_id}")
 
     def batch_job_action(self, job_ids: list, action: str):
         """배치 작업 처리"""
-        if action == 'delete':
-            reply = QMessageBox.question(
-                self, "삭제 확인",
-                f"{len(job_ids)}개 작업을 삭제하시겠습니까?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply != QMessageBox.Yes:
-                return
-
         for job_id in job_ids:
             if action == 'exclude':
                 self.farm_manager.exclude_job(job_id)
