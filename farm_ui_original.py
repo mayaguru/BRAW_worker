@@ -1939,7 +1939,6 @@ class FarmUI(QMainWindow):
 
     def show_settings(self):
         """설정 다이얼로그 표시"""
-        old_farm_root = settings.farm_root  # 변경 전 경로 저장
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
             # 설정 즉시 적용
@@ -1949,10 +1948,6 @@ class FarmUI(QMainWindow):
             # FarmManager의 경로도 업데이트
             self.farm_manager = FarmManager()
 
-            # 작업 폴더(farm_root)가 변경되면 상태 스레드 재시작
-            if old_farm_root != settings.farm_root:
-                self.restart_status_thread()
-
             QMessageBox.information(
                 self,
                 "설정 적용됨",
@@ -1961,19 +1956,6 @@ class FarmUI(QMainWindow):
                 f"CLI 경로: {settings.cli_path}\n"
                 f"병렬 처리: {settings.parallel_workers}"
             )
-
-    def restart_status_thread(self):
-        """상태 업데이트 스레드 재시작 (작업 폴더 변경 시)"""
-        # 기존 스레드 중지
-        if self.status_thread:
-            self.status_thread.stop()
-            self.status_thread.wait(3000)
-
-        # 새 스레드 시작 (새 farm_manager 사용)
-        self.status_thread = StatusUpdateThread(self.farm_manager)
-        self.status_thread.workers_signal.connect(self.update_workers_table)
-        self.status_thread.jobs_signal.connect(self.update_jobs_table)
-        self.status_thread.start()
 
     def save_render_options(self):
         """렌더링 옵션을 설정 파일에 저장"""

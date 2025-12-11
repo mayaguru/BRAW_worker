@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #ifdef BRAW_SDK_AVAILABLE
 #include <algorithm>
@@ -24,6 +25,11 @@
 #endif
 #include "BlackmagicRawAPI.h"
 #include "BlackmagicRawAPIDispatch.h"
+
+#ifdef CUDA_AVAILABLE
+#include <cuda.h>
+#include <cuda_runtime.h>
+#endif
 #endif
 
 namespace braw {
@@ -32,14 +38,16 @@ namespace {
 
 #ifdef BRAW_SDK_AVAILABLE
 void log_hresult(const char* message, HRESULT hr) {
-    std::cerr << message << " (HRESULT=0x" << std::hex << hr << std::dec << ")\n";
+    std::cerr << message << " (HRESULT=0x" << std::hex << hr << std::dec << ")" << std::endl;
 }
 
-// 디코딩 타임아웃 (밀리초)
-constexpr int DECODE_TIMEOUT_MS = 30000;  // 30초
+constexpr int DECODE_TIMEOUT_MS = 30000;
 
-// SDK ProcessClipCPU 패턴: 동기식 단일 프레임 처리용 콜백
-// 비동기 멀티프레임이 아닌, 한 프레임씩 동기 처리
+#ifdef CUDA_AVAILABLE
+static void* g_cuda_context = nullptr;
+static bool g_gpu_pipeline_ready = false;
+#endif
+
 class SyncFrameCallback final : public IBlackmagicRawCallback {
   public:
     explicit SyncFrameCallback() = default;
@@ -75,6 +83,7 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
         }
 
         if (SUCCEEDED(result)) {
+            // GPU pipeline이 준비되면 SDK가 자동으로 GPU 사용
             result = frame->CreateJobDecodeAndProcessFrame(nullptr, nullptr, &decode_job);
         }
 
@@ -86,7 +95,6 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
             if (decode_job) {
                 decode_job->Release();
             }
-            // 실패 시 완료 신호
             std::lock_guard<std::mutex> lock(mutex_);
             succeeded_ = false;
             completed_ = true;
@@ -109,22 +117,47 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
                 SUCCEEDED(processedImage->GetHeight(&height)) &&
                 SUCCEEDED(processedImage->GetResource(&resource))) {
 
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (result_buffer_) {
-                    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-                    result_buffer_->format = FramePixelFormat::kRGBFloat32;
-                    result_buffer_->resize(width, height);
+                // Check if resource is on GPU and need to copy to CPU
+                BlackmagicRawResourceType resource_type = blackmagicRawResourceTypeBufferCPU;
+                processedImage->GetResourceType(&resource_type);
 
-                    auto span = result_buffer_->as_span();
-                    std::memcpy(span.data(), resource, pixel_count * 3 * sizeof(float));
-                    success = true;
+                void* cpu_resource = resource;
+#ifdef CUDA_AVAILABLE
+                std::vector<float> gpu_copy_buffer;
+                if (resource_type == blackmagicRawResourceTypeBufferCUDA && g_gpu_pipeline_ready) {
+                    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+                    const size_t data_size = pixel_count * 3 * sizeof(float);
+                    gpu_copy_buffer.resize(pixel_count * 3);
+
+                    // Copy from GPU to CPU using CUDA
+                    cudaError_t cuda_err = cudaMemcpy(gpu_copy_buffer.data(), resource,
+                                                      data_size, cudaMemcpyDeviceToHost);
+                    if (cuda_err == cudaSuccess) {
+                        cpu_resource = gpu_copy_buffer.data();
+                    } else {
+                        std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(cuda_err) << std::endl;
+                        cpu_resource = nullptr;
+                    }
+                }
+#endif
+
+                if (cpu_resource) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (result_buffer_) {
+                        const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+                        result_buffer_->format = FramePixelFormat::kRGBFloat32;
+                        result_buffer_->resize(width, height);
+
+                        auto span = result_buffer_->as_span();
+                        std::memcpy(span.data(), cpu_resource, pixel_count * 3 * sizeof(float));
+                        success = true;
+                    }
                 }
             }
         }
 
         job->Release();
 
-        // 완료 신호
         {
             std::lock_guard<std::mutex> lock(mutex_);
             succeeded_ = success;
@@ -149,10 +182,6 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
         return E_NOINTERFACE;
     }
 
-    // NOTE: COM 참조 카운팅 미구현 (항상 1 반환)
-    // 이 콜백은 스택에 할당되어 decode_frame() 내에서만 사용되므로
-    // 실제 참조 카운팅이 필요하지 않음. SDK가 Release()를 호출해도
-    // 객체가 삭제되지 않아야 하므로 의도적으로 1을 반환함.
     ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
     ULONG STDMETHODCALLTYPE Release() override { return 1; }
 
@@ -199,9 +228,75 @@ struct BrawDecoder::Impl {
     ComThreadingModel threading_model{ComThreadingModel::kMultiThreaded};
     std::wstring sdk_library_dir;
 
-    // 콜백은 클립 열 때 한 번만 설정
     SyncFrameCallback callback;
     bool callback_set{false};
+
+#ifdef CUDA_AVAILABLE
+    bool init_gpu_pipeline() {
+        if (g_gpu_pipeline_ready) return true;
+
+        CUresult cu_result = cuInit(0);
+        if (cu_result != CUDA_SUCCESS) {
+            std::cerr << "Failed to initialize CUDA driver" << std::endl;
+            return false;
+        }
+
+        int device_count = 0;
+        if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count == 0) {
+            std::cerr << "No CUDA devices found, using CPU decoding" << std::endl;
+            return false;
+        }
+
+        CUdevice cuda_device;
+        if (cuDeviceGet(&cuda_device, 0) != CUDA_SUCCESS) {
+            std::cerr << "Failed to get CUDA device" << std::endl;
+            return false;
+        }
+
+        char device_name[256];
+        cuDeviceGetName(device_name, 255, cuda_device);
+        std::cerr << "Using GPU: " << device_name << std::endl;
+
+        CUcontext ctx;
+        cu_result = cuCtxCreate(&ctx, CU_CTX_MAP_HOST | CU_CTX_SCHED_BLOCKING_SYNC, cuda_device);
+        if (cu_result != CUDA_SUCCESS) {
+            std::cerr << "Failed to create CUDA context (error: " << cu_result << ")" << std::endl;
+            return false;
+        }
+        g_cuda_context = ctx;
+
+        if (codec) {
+            // Use IBlackmagicRawConfiguration::SetPipeline instead of PreparePipeline
+            IBlackmagicRawConfiguration* config = nullptr;
+            HRESULT hr = codec->QueryInterface(IID_IBlackmagicRawConfiguration,
+                                                reinterpret_cast<void**>(&config));
+            if (SUCCEEDED(hr) && config) {
+                hr = config->SetPipeline(blackmagicRawPipelineCUDA, g_cuda_context, nullptr);
+                config->Release();
+                if (SUCCEEDED(hr)) {
+                    g_gpu_pipeline_ready = true;
+                    std::cerr << "GPU pipeline ready (CUDA)" << std::endl;
+                    return true;
+                } else {
+                    log_hresult("SetPipeline(CUDA) failed", hr);
+                }
+            } else {
+                log_hresult("Failed to get IBlackmagicRawConfiguration", hr);
+            }
+            cuCtxDestroy(ctx);
+            g_cuda_context = nullptr;
+        }
+        return false;
+    }
+
+    void release_gpu() {
+        if (g_cuda_context) {
+            cuCtxDestroy(static_cast<CUcontext>(g_cuda_context));
+            g_cuda_context = nullptr;
+        }
+        g_gpu_pipeline_ready = false;
+    }
+#endif
 
     bool ensure_com() {
         if (com_initialized) {
@@ -217,7 +312,7 @@ struct BrawDecoder::Impl {
             return true;
         }
         if (FAILED(hr)) {
-            log_hresult("COM 초기화 실패", hr);
+            log_hresult("COM initialization failed", hr);
             return false;
         }
         com_initialized = true;
@@ -247,16 +342,20 @@ struct BrawDecoder::Impl {
         }
 
         if (!factory) {
-            std::cerr << "IBlackmagicRawFactory 생성 실패\n";
+            std::cerr << "Failed to create IBlackmagicRawFactory" << std::endl;
             return false;
         }
 
         if (!codec) {
             const HRESULT hr = factory->CreateCodec(&codec);
             if (FAILED(hr) || !codec) {
-                log_hresult("IBlackmagicRaw 생성 실패", hr);
+                log_hresult("Failed to create IBlackmagicRaw", hr);
                 return false;
             }
+
+#ifdef CUDA_AVAILABLE
+            init_gpu_pipeline();
+#endif
         }
         return true;
     }
@@ -280,6 +379,9 @@ struct BrawDecoder::Impl {
             codec->Release();
             codec = nullptr;
         }
+#ifdef CUDA_AVAILABLE
+        release_gpu();
+#endif
         if (factory) {
             factory->Release();
             factory = nullptr;
@@ -313,7 +415,7 @@ bool BrawDecoder::open_clip(const std::filesystem::path& clip_path) {
     close_clip();
 
     if (!std::filesystem::exists(clip_path)) {
-        std::cerr << "파일이 존재하지 않습니다: " << clip_path << "\n";
+        std::cerr << "File does not exist: " << clip_path << std::endl;
         return false;
     }
 
@@ -327,7 +429,7 @@ bool BrawDecoder::open_clip(const std::filesystem::path& clip_path) {
     const HRESULT hr = impl_->codec->OpenClip(clip_bstr, &clip);
     SysFreeString(clip_bstr);
     if (FAILED(hr) || !clip) {
-        log_hresult("클립 열기 실패", hr);
+        log_hresult("Failed to open clip", hr);
         return false;
     }
 
@@ -365,10 +467,9 @@ bool BrawDecoder::open_clip(const std::filesystem::path& clip_path) {
         immersive_clip->Release();
     }
 
-    // 콜백은 클립 열 때 한 번만 설정 (SDK 패턴)
     HRESULT cb_hr = impl_->codec->SetCallback(&impl_->callback);
     if (FAILED(cb_hr)) {
-        log_hresult("콜백 설정 실패", cb_hr);
+        log_hresult("Failed to set callback", cb_hr);
         return false;
     }
     impl_->callback_set = true;
@@ -383,7 +484,7 @@ bool BrawDecoder::open_clip(const std::filesystem::path& clip_path) {
     info.frame_count = 1;
     info.frame_rate = 24.0;
     impl_->info = info;
-    std::cerr << "BRAW SDK가 비활성화되어 있으므로 실제 디코딩이 불가합니다.\n";
+    std::cerr << "BRAW SDK is disabled, actual decoding not available." << std::endl;
     return true;
 #endif
 }
@@ -404,25 +505,23 @@ bool BrawDecoder::decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, St
     return true;
 #else
     if (!impl_->clip || !impl_->codec) {
-        std::cerr << "클립 또는 코덱이 초기화되지 않았습니다.\n";
+        std::cerr << "Clip or codec not initialized." << std::endl;
         return false;
     }
 
     if (!impl_->callback_set) {
-        std::cerr << "콜백이 설정되지 않았습니다.\n";
+        std::cerr << "Callback not set." << std::endl;
         return false;
     }
 
     if (impl_->info && frame_index >= impl_->info->frame_count) {
-        std::cerr << "프레임 인덱스가 범위를 벗어났습니다.\n";
+        std::cerr << "Frame index out of range." << std::endl;
         return false;
     }
 
-    // 콜백 상태 초기화 및 버퍼 설정
     impl_->callback.reset();
     impl_->callback.set_target_buffer(&out_buffer);
 
-    // 읽기 작업 생성
     IBlackmagicRawJob* read_job = nullptr;
     HRESULT hr;
 
@@ -438,20 +537,19 @@ bool BrawDecoder::decode_frame(uint32_t frame_index, FrameBuffer& out_buffer, St
     }
 
     if (FAILED(hr) || !read_job) {
-        log_hresult("프레임 읽기 작업 생성 실패", hr);
+        log_hresult("Failed to create read frame job", hr);
         return false;
     }
 
     hr = read_job->Submit();
     if (FAILED(hr)) {
-        log_hresult("프레임 읽기 작업 제출 실패", hr);
+        log_hresult("Failed to submit read frame job", hr);
         read_job->Release();
         return false;
     }
 
-    // 콜백 완료 대기
     if (!impl_->callback.wait_for_completion(DECODE_TIMEOUT_MS)) {
-        std::cerr << "프레임 디코딩 타임아웃\n";
+        std::cerr << "Frame decoding timeout" << std::endl;
         return false;
     }
 

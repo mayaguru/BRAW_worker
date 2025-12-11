@@ -61,3 +61,12 @@ if (BRAW_ENABLE_SDK AND BRAW_SDK_FOUND)
 else()
     target_compile_definitions(braw_core PUBLIC BRAW_SDK_AVAILABLE=0)
 endif()
+
+# CUDA GPU acceleration
+if (CUDA_FOUND)
+    target_compile_definitions(braw_core PUBLIC CUDA_AVAILABLE=1)
+    target_link_libraries(braw_core PUBLIC CUDA::cuda_driver CUDA::cudart)
+    message(STATUS "CUDA GPU acceleration enabled for braw_core")
+else()
+    target_compile_definitions(braw_core PUBLIC CUDA_AVAILABLE=0)
+endif()
