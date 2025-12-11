@@ -1167,10 +1167,11 @@ class FarmUIV2(QMainWindow):
 
 
     def parse_custom_frames(self, input_text: str) -> list:
-        """커스텀 프레임 문자열 파싱
+        """커스텀 프레임 문자열 파싱 (연속 프레임 자동 범위화)
 
-        입력 예: "509, 540, 602, 1675-1679, 1707"
-        출력: [(509, 509), (540, 540), (602, 602), (1675, 1679), (1707, 1707)]
+        입력 예: "509, 540, 602, 1675-1679, 1707" 또는 "509,540,541,542,543"
+        출력: [(509, 509), (540, 543), (602, 602), (1675, 1679), (1707, 1707)]
+        연속된 개별 프레임은 자동으로 범위로 합쳐짐
         """
         if not input_text.strip():
             return []
@@ -1178,12 +1179,12 @@ class FarmUIV2(QMainWindow):
         import re
 
         # 다양한 하이픈/대시 문자를 일반 하이픈으로 정규화
-        # 엔 대시, 엠 대시, 전각 하이픈, 마이너스, 틸드 등
         normalized = re.sub(r'[\u2013\u2014\uFF0D\u2010\u2011\u2012\u2015\u2212~]', '-', input_text)
         # 전각 쉼표, 세미콜론도 쉼표로
         normalized = re.sub(r'[\uFF0C;\uFF1B]', ',', normalized)
 
-        result = []
+        # 먼저 모든 프레임 번호를 수집
+        all_frames = set()
         parts = normalized.replace(" ", "").split(",")
 
         for part in parts:
@@ -1197,20 +1198,45 @@ class FarmUIV2(QMainWindow):
                     start, end = part.split("-", 1)
                     start_frame = int(start)
                     end_frame = int(end)
-                    if start_frame <= end_frame:
-                        result.append((start_frame, end_frame))
-                    else:
-                        # 역순이면 자동 수정
-                        result.append((end_frame, start_frame))
+                    if start_frame > end_frame:
+                        start_frame, end_frame = end_frame, start_frame
+                    for f in range(start_frame, end_frame + 1):
+                        all_frames.add(f)
                 except ValueError:
-                    self.append_worker_log(f"\u26a0\ufe0f \uc798\ubabb\ub41c \ubc94\uc704: {part}")
+                    self.append_worker_log(f"⚠️ 잘못된 범위: {part}")
             else:
                 # 개별 프레임: 509
                 try:
                     frame = int(part)
-                    result.append((frame, frame))
+                    all_frames.add(frame)
                 except ValueError:
-                    self.append_worker_log(f"\u26a0\ufe0f \uc798\ubabb\ub41c \ud504\ub808\uc784: {part}")
+                    self.append_worker_log(f"⚠️ 잘못된 프레임: {part}")
+
+        if not all_frames:
+            return []
+
+        # 정렬 후 연속 프레임을 범위로 합치기
+        sorted_frames = sorted(all_frames)
+        result = []
+        range_start = sorted_frames[0]
+        range_end = sorted_frames[0]
+
+        for frame in sorted_frames[1:]:
+            if frame == range_end + 1:
+                # 연속
+                range_end = frame
+            else:
+                # 연속 끊김, 이전 범위 저장
+                result.append((range_start, range_end))
+                range_start = frame
+                range_end = frame
+
+        # 마지막 범위 저장
+        result.append((range_start, range_end))
+
+        # 로그 출력
+        total_frames = sum(end - start + 1 for start, end in result)
+        self.append_worker_log(f"📋 커스텀 프레임: {len(result)}개 범위, 총 {total_frames}프레임")
 
         return result
 
