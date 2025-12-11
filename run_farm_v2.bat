@@ -15,7 +15,7 @@ echo  venv: %UV_PROJECT_ENVIRONMENT%
 echo ============================================
 echo.
 
-cd /d "%~dp0"
+cd /d "%~dp0braw_batch_ui"
 uv run python -m braw_batch_ui.farm_ui_v2
 
 pause
