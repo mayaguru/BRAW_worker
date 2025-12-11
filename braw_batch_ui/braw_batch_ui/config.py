@@ -88,6 +88,11 @@ class FarmSettings:
         # 배치 처리 설정
         self.batch_frame_size = 10  # 연속 처리 프레임 수 (5프레임 * 12워커 = 60프레임/1초)
 
+        # SeqChecker 설정
+        self.seqchecker_path = "P:/00-GIGA/BRAW_CLI/tool/SeqChecker/seqchecker.exe"
+        self.seqchecker_auto_scan = True  # 작업 완료 후 자동 스캔
+        self.seqchecker_auto_rerender = True  # 오류 프레임 자동 재렌더 잡 생성
+
         # 설정 파일 경로 (로컬 - 내 문서)
         # Windows: C:\Users\사용자명\Documents\BRAW Farm\config.json
         # 다른 OS: ~/Documents/BRAW Farm/config.json
@@ -128,6 +133,10 @@ class FarmSettings:
                         self.stmap_path = data.get("stmap_path", self.stmap_path)
                         # 배치 처리 설정
                         self.batch_frame_size = data.get("batch_frame_size", self.batch_frame_size)
+                        # SeqChecker 설정
+                        self.seqchecker_path = data.get("seqchecker_path", self.seqchecker_path)
+                        self.seqchecker_auto_scan = data.get("seqchecker_auto_scan", self.seqchecker_auto_scan)
+                        self.seqchecker_auto_rerender = data.get("seqchecker_auto_rerender", self.seqchecker_auto_rerender)
                 except (json.JSONDecodeError, OSError) as e:
                     print(f"설정 로드 실패: {e}")
 
@@ -160,7 +169,10 @@ class FarmSettings:
                     "render_use_aces": self.render_use_aces,
                     "render_use_stmap": self.render_use_stmap,
                     "stmap_path": self.stmap_path,
-                    "batch_frame_size": self.batch_frame_size
+                    "batch_frame_size": self.batch_frame_size,
+                    "seqchecker_path": self.seqchecker_path,
+                    "seqchecker_auto_scan": self.seqchecker_auto_scan,
+                    "seqchecker_auto_rerender": self.seqchecker_auto_rerender
                 }
 
                 with open(self.config_file, 'w', encoding='utf-8') as f:

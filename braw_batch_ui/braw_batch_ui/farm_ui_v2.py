@@ -7,6 +7,8 @@ SQLite DB 기반 분산 렌더링 시스템 - Pool 지원
 import sys
 import subprocess
 import platform
+import re
+from typing import Optional, List, Tuple
 
 SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 import json
@@ -309,6 +311,7 @@ class WorkerThreadV2(QThread):
 
     log_signal = Signal(str)
     progress_signal = Signal(int, int)  # completed, total
+    job_completed_signal = Signal(str)  # job_id - 작업 완료 시 시그널
 
     def __init__(self, farm_manager: FarmManagerV2, cli_path: Path,
                  parallel_workers: int = 10, watchdog_mode: bool = True):
@@ -426,6 +429,10 @@ class WorkerThreadV2(QThread):
                             # 진행률 업데이트
                             progress = self.farm_manager.get_job_progress(job_id)
                             self.progress_signal.emit(progress['completed'], progress['total'])
+
+                            # 작업 완료 확인 및 신호 발송
+                            if progress['completed'] >= progress['total'] and progress['total'] > 0:
+                                self.job_completed_signal.emit(job_id)
 
                     # 작업이 없고 대기 중인 것도 없으면
                     if not futures:
@@ -1440,6 +1447,11 @@ class FarmUIV2(QMainWindow):
             open_folder_action = QAction("📂 출력 폴더 열기", self)
             open_folder_action.triggered.connect(lambda: self.open_job_output_folder(job_ids[0]))
             menu.addAction(open_folder_action)
+
+            # SeqChecker 스캔
+            scan_action = QAction("🔍 SeqChecker 스캔", self)
+            scan_action.triggered.connect(lambda: self.scan_and_rerender_job(job_ids[0]))
+            menu.addAction(scan_action)
             menu.addSeparator()
 
         # 상태 변경
@@ -1550,6 +1562,7 @@ class FarmUIV2(QMainWindow):
         )
         self.worker_thread.log_signal.connect(self.append_worker_log)
         self.worker_thread.progress_signal.connect(self.update_progress)
+        self.worker_thread.job_completed_signal.connect(self.on_job_completed)
         self.worker_thread.start()
 
         self.start_btn.setEnabled(False)
@@ -1674,6 +1687,192 @@ class FarmUIV2(QMainWindow):
             self.restoreGeometry(geometry)
         if state:
             self.restoreState(state)
+
+    # ===== SeqChecker Integration =====
+
+    def run_seqchecker(self, job_id: str) -> Optional[List[int]]:
+        """SeqChecker 실행 및 오류 프레임 반환"""
+        job = self.farm_manager.get_job(job_id)
+        if not job:
+            self.append_worker_log(f"⚠️ 작업을 찾을 수 없습니다: {job_id}")
+            return None
+
+        output_path = Path(job.output_dir)
+
+        if not output_path.exists():
+            self.append_worker_log(f"⚠️ 출력 폴더가 없습니다: {output_path}")
+            return None
+
+        seqchecker_path = Path(settings.seqchecker_path)
+        if not seqchecker_path.exists():
+            self.append_worker_log(f"⚠️ SeqChecker를 찾을 수 없습니다: {seqchecker_path}")
+            return None
+
+        # 스캔할 폴더 결정 (SBS, L, R 순서)
+        scan_folders = []
+        eyes = job.eyes if job.eyes else ['sbs']
+        if 'sbs' in eyes:
+            sbs_path = output_path / "SBS"
+            if sbs_path.exists():
+                scan_folders.append(sbs_path)
+        if 'left' in eyes:
+            l_path = output_path / "L"
+            if l_path.exists():
+                scan_folders.append(l_path)
+        if 'right' in eyes:
+            r_path = output_path / "R"
+            if r_path.exists():
+                scan_folders.append(r_path)
+
+        if not scan_folders:
+            # 폴더 분리 안 된 경우 출력 폴더 직접 스캔
+            scan_folders = [output_path]
+
+        all_error_frames = set()
+
+        for folder in scan_folders:
+            self.append_worker_log(f"🔍 SeqChecker 스캔: {folder}")
+            try:
+                result = subprocess.run(
+                    [str(seqchecker_path), str(folder), "-q"],
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5분 타임아웃
+                )
+
+                # 리포트 파일 찾기
+                report_files = list(folder.parent.glob(f"{folder.name}*_report.txt"))
+                if not report_files:
+                    report_files = list(folder.glob("*_report.txt"))
+
+                if report_files:
+                    report_path = report_files[0]
+                    error_frames = self.parse_seqchecker_report(report_path)
+                    if error_frames:
+                        all_error_frames.update(error_frames)
+                        self.append_worker_log(f"  ❌ 오류 프레임 {len(error_frames)}개: {error_frames[:10]}{'...' if len(error_frames) > 10 else ''}")
+                    else:
+                        self.append_worker_log(f"  ✅ 오류 없음")
+                else:
+                    if result.returncode != 0:
+                        self.append_worker_log(f"  ⚠️ SeqChecker 오류 (리포트 없음)")
+
+            except subprocess.TimeoutExpired:
+                self.append_worker_log(f"  ⚠️ SeqChecker 타임아웃")
+            except Exception as e:
+                self.append_worker_log(f"  ⚠️ SeqChecker 오류: {e}")
+
+        return sorted(all_error_frames) if all_error_frames else None
+
+    def parse_seqchecker_report(self, report_path: Path) -> List[int]:
+        """SeqChecker 리포트에서 오류 프레임 파싱"""
+        try:
+            with open(report_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # RE-RENDER_FRAMES: 라인 찾기
+            match = re.search(r'RE-RENDER_FRAMES:\s*\n([\d,\s]+)', content)
+            if match:
+                frames_str = match.group(1).strip()
+                if frames_str:
+                    return [int(x.strip()) for x in frames_str.split(',') if x.strip().isdigit()]
+            return []
+        except Exception as e:
+            self.append_worker_log(f"  ⚠️ 리포트 파싱 오류: {e}")
+            return []
+
+    def create_rerender_job(self, original_job_id: str, error_frames: List[int]) -> Optional[str]:
+        """오류 프레임에 대한 재렌더 작업 생성"""
+        original_job = self.farm_manager.get_job(original_job_id)
+        if not original_job:
+            return None
+
+        # 프레임 범위를 연속 구간으로 그룹화
+        ranges = self.group_frames_to_ranges(error_frames)
+
+        # 프레임 범위 문자열 생성 (start_frame, end_frame 갱신)
+        if ranges:
+            start_frame = ranges[0][0]
+            end_frame = ranges[-1][1]
+        else:
+            return None
+
+        # 새 작업 생성 (V2 API 사용)
+        new_job_id = self.farm_manager.submit_job(
+            clip_path=original_job.clip_path,
+            output_dir=original_job.output_dir,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            eyes=original_job.eyes,
+            pool_id=original_job.pool_id,
+            format=original_job.format,
+            separate_folders=original_job.separate_folders,
+            use_aces=original_job.use_aces,
+            color_input_space=original_job.color_input_space,
+            color_output_space=original_job.color_output_space,
+            use_stmap=original_job.use_stmap,
+            stmap_path=original_job.stmap_path,
+            priority=min(original_job.priority + 10, 100)  # 우선순위 높임 (max 100)
+        )
+
+        self.append_worker_log(f"🔄 재렌더 작업 생성: {new_job_id} ({len(error_frames)}프레임)")
+
+        return new_job_id
+
+    def group_frames_to_ranges(self, frames: List[int]) -> List[Tuple[int, int]]:
+        """프레임 목록을 연속 구간으로 그룹화"""
+        if not frames:
+            return []
+
+        frames = sorted(frames)
+        ranges = []
+        start = frames[0]
+        end = frames[0]
+
+        for frame in frames[1:]:
+            if frame == end + 1:
+                end = frame
+            else:
+                ranges.append((start, end))
+                start = frame
+                end = frame
+
+        ranges.append((start, end))
+        return ranges
+
+    def scan_and_rerender_job(self, job_id: str):
+        """작업 스캔 후 오류 프레임 재렌더"""
+        error_frames = self.run_seqchecker(job_id)
+        if error_frames and settings.seqchecker_auto_rerender:
+            new_job_id = self.create_rerender_job(job_id, error_frames)
+            if new_job_id:
+                self.refresh_jobs()
+        elif error_frames:
+            self.append_worker_log(f"ℹ️ 오류 프레임 {len(error_frames)}개 발견 (자동 재렌더 비활성화)")
+
+    def on_job_completed(self, job_id: str):
+        """작업 완료 시 자동 SeqChecker 스캔"""
+        if settings.seqchecker_auto_scan:
+            self.append_worker_log(f"🔍 작업 완료 - 자동 SeqChecker 스캔: {job_id}")
+            # 별도 스레드에서 실행 (UI 블로킹 방지)
+            import threading
+            threading.Thread(
+                target=self._run_seqchecker_async,
+                args=(job_id,),
+                daemon=True
+            ).start()
+
+    def _run_seqchecker_async(self, job_id: str):
+        """비동기 SeqChecker 실행"""
+        try:
+            error_frames = self.run_seqchecker(job_id)
+            if error_frames and settings.seqchecker_auto_rerender:
+                new_job_id = self.create_rerender_job(job_id, error_frames)
+                if new_job_id:
+                    # UI 스레드에서 새로고침
+                    QTimer.singleShot(0, self.refresh_jobs)
+        except Exception as e:
+            self.append_worker_log(f"⚠️ SeqChecker 오류: {e}")
 
 
 def main():
