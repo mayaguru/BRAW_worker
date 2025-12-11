@@ -942,7 +942,7 @@ class FarmManager:
             (start_frame, end_frame, eye) 또는 None
         """
         if batch_size is None:
-            batch_size = BATCH_FRAME_SIZE
+            batch_size = settings.batch_frame_size
 
         total_frames = job.end_frame - job.start_frame + 1
 

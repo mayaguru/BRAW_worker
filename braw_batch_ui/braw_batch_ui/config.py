@@ -84,6 +84,9 @@ class FarmSettings:
         self.render_use_stmap = False  # STMAP 적용
         self.stmap_path = ""  # STMAP EXR 파일 경로
 
+        # 배치 처리 설정
+        self.batch_frame_size = 32  # 연속 처리 프레임 수 (한 워커가 한 번에 처리할 프레임)
+
         # 설정 파일 경로 (로컬 - 내 문서)
         # Windows: C:\Users\사용자명\Documents\BRAW Farm\config.json
         # 다른 OS: ~/Documents/BRAW Farm/config.json
@@ -121,6 +124,8 @@ class FarmSettings:
                         self.render_use_aces = data.get("render_use_aces", self.render_use_aces)
                         self.render_use_stmap = data.get("render_use_stmap", self.render_use_stmap)
                         self.stmap_path = data.get("stmap_path", self.stmap_path)
+                        # 배치 처리 설정
+                        self.batch_frame_size = data.get("batch_frame_size", self.batch_frame_size)
                 except (json.JSONDecodeError, OSError) as e:
                     print(f"설정 로드 실패: {e}")
 
@@ -151,7 +156,8 @@ class FarmSettings:
                     "render_separate_lr": self.render_separate_lr,
                     "render_use_aces": self.render_use_aces,
                     "render_use_stmap": self.render_use_stmap,
-                    "stmap_path": self.stmap_path
+                    "stmap_path": self.stmap_path,
+                    "batch_frame_size": self.batch_frame_size
                 }
 
                 with open(self.config_file, 'w', encoding='utf-8') as f:

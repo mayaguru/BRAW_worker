@@ -325,6 +325,22 @@ class SettingsDialog(QDialog):
         retry_layout.addStretch()
         layout.addLayout(retry_layout)
 
+        # 연속 처리 프레임 수
+        batch_layout = QHBoxLayout()
+        batch_layout.addWidget(QLabel("연속 처리:"))
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 100)
+        self.batch_spin.setValue(settings.batch_frame_size)
+        self.batch_spin.setToolTip(
+            "한 워커가 한 번에 처리할 프레임 수\n"
+            "여러 PC 사용 시 작게 설정 (8~16 권장)\n"
+            "혼자 사용 시 크게 설정 (32~64)"
+        )
+        batch_layout.addWidget(self.batch_spin)
+        batch_layout.addWidget(QLabel("프레임"))
+        batch_layout.addStretch()
+        layout.addLayout(batch_layout)
+
         # 버튼
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("저장")
@@ -359,6 +375,7 @@ class SettingsDialog(QDialog):
         settings.cli_path = self.cli_path_input.text()
         settings.parallel_workers = self.parallel_spin.value()
         settings.max_retries = self.retry_spin.value()
+        settings.batch_frame_size = self.batch_spin.value()
         settings.save()
         self.accept()
 
@@ -542,7 +559,7 @@ class WorkerThread(QThread):
         self.log_signal.emit(f"\n작업 발견: {job.job_id}")
         self.log_signal.emit(f"  파일: {Path(job.clip_path).name}")
         self.log_signal.emit(f"  범위: {job.start_frame}-{job.end_frame}")
-        self.log_signal.emit(f"  배치 크기: {BATCH_FRAME_SIZE}프레임")
+        self.log_signal.emit(f"  배치 크기: {settings.batch_frame_size}프레임")
 
         # 워커 상태 및 현재 작업 정보 업데이트
         self.farm_manager.worker.status = "active"
@@ -562,7 +579,7 @@ class WorkerThread(QThread):
         for _ in range(self.parallel_workers):
             if not self.is_running:
                 break
-            result = self.farm_manager.find_next_frame_range(job, BATCH_FRAME_SIZE)
+            result = self.farm_manager.find_next_frame_range(job, settings.batch_frame_size)
             if result:
                 range_tasks.append(result)
 
