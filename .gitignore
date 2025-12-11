@@ -33,3 +33,4 @@ farm.db-shm
 farm.db-wal
 braw_batch_ui/run_farm_v2.bat - 바로 가기.lnk
 .claude/settings.local.json
+BRAW_RenderFarm.bat - 바로 가기.lnk
