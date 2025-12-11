@@ -9,7 +9,6 @@
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <vector>
 
 #ifdef BRAW_SDK_AVAILABLE
 #include <algorithm>
@@ -26,10 +25,6 @@
 #include "BlackmagicRawAPI.h"
 #include "BlackmagicRawAPIDispatch.h"
 
-#ifdef CUDA_AVAILABLE
-#include <cuda.h>
-#include <cuda_runtime.h>
-#endif
 #endif
 
 namespace braw {
@@ -42,11 +37,6 @@ void log_hresult(const char* message, HRESULT hr) {
 }
 
 constexpr int DECODE_TIMEOUT_MS = 30000;
-
-#ifdef CUDA_AVAILABLE
-static void* g_cuda_context = nullptr;
-static bool g_gpu_pipeline_ready = false;
-#endif
 
 class SyncFrameCallback final : public IBlackmagicRawCallback {
   public:
@@ -83,7 +73,6 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
         }
 
         if (SUCCEEDED(result)) {
-            // GPU pipeline이 준비되면 SDK가 자동으로 GPU 사용
             result = frame->CreateJobDecodeAndProcessFrame(nullptr, nullptr, &decode_job);
         }
 
@@ -117,41 +106,15 @@ class SyncFrameCallback final : public IBlackmagicRawCallback {
                 SUCCEEDED(processedImage->GetHeight(&height)) &&
                 SUCCEEDED(processedImage->GetResource(&resource))) {
 
-                // Check if resource is on GPU and need to copy to CPU
-                BlackmagicRawResourceType resource_type = blackmagicRawResourceTypeBufferCPU;
-                processedImage->GetResourceType(&resource_type);
-
-                void* cpu_resource = resource;
-#ifdef CUDA_AVAILABLE
-                std::vector<float> gpu_copy_buffer;
-                if (resource_type == blackmagicRawResourceTypeBufferCUDA && g_gpu_pipeline_ready) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (result_buffer_) {
                     const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-                    const size_t data_size = pixel_count * 3 * sizeof(float);
-                    gpu_copy_buffer.resize(pixel_count * 3);
+                    result_buffer_->format = FramePixelFormat::kRGBFloat32;
+                    result_buffer_->resize(width, height);
 
-                    // Copy from GPU to CPU using CUDA
-                    cudaError_t cuda_err = cudaMemcpy(gpu_copy_buffer.data(), resource,
-                                                      data_size, cudaMemcpyDeviceToHost);
-                    if (cuda_err == cudaSuccess) {
-                        cpu_resource = gpu_copy_buffer.data();
-                    } else {
-                        std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(cuda_err) << std::endl;
-                        cpu_resource = nullptr;
-                    }
-                }
-#endif
-
-                if (cpu_resource) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (result_buffer_) {
-                        const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-                        result_buffer_->format = FramePixelFormat::kRGBFloat32;
-                        result_buffer_->resize(width, height);
-
-                        auto span = result_buffer_->as_span();
-                        std::memcpy(span.data(), cpu_resource, pixel_count * 3 * sizeof(float));
-                        success = true;
-                    }
+                    auto span = result_buffer_->as_span();
+                    std::memcpy(span.data(), resource, pixel_count * 3 * sizeof(float));
+                    success = true;
                 }
             }
         }
@@ -231,73 +194,6 @@ struct BrawDecoder::Impl {
     SyncFrameCallback callback;
     bool callback_set{false};
 
-#ifdef CUDA_AVAILABLE
-    bool init_gpu_pipeline() {
-        if (g_gpu_pipeline_ready) return true;
-
-        CUresult cu_result = cuInit(0);
-        if (cu_result != CUDA_SUCCESS) {
-            std::cerr << "Failed to initialize CUDA driver" << std::endl;
-            return false;
-        }
-
-        int device_count = 0;
-        if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count == 0) {
-            std::cerr << "No CUDA devices found, using CPU decoding" << std::endl;
-            return false;
-        }
-
-        CUdevice cuda_device;
-        if (cuDeviceGet(&cuda_device, 0) != CUDA_SUCCESS) {
-            std::cerr << "Failed to get CUDA device" << std::endl;
-            return false;
-        }
-
-        char device_name[256];
-        cuDeviceGetName(device_name, 255, cuda_device);
-        std::cerr << "Using GPU: " << device_name << std::endl;
-
-        CUcontext ctx;
-        cu_result = cuCtxCreate(&ctx, CU_CTX_MAP_HOST | CU_CTX_SCHED_BLOCKING_SYNC, cuda_device);
-        if (cu_result != CUDA_SUCCESS) {
-            std::cerr << "Failed to create CUDA context (error: " << cu_result << ")" << std::endl;
-            return false;
-        }
-        g_cuda_context = ctx;
-
-        if (codec) {
-            // Use IBlackmagicRawConfiguration::SetPipeline instead of PreparePipeline
-            IBlackmagicRawConfiguration* config = nullptr;
-            HRESULT hr = codec->QueryInterface(IID_IBlackmagicRawConfiguration,
-                                                reinterpret_cast<void**>(&config));
-            if (SUCCEEDED(hr) && config) {
-                hr = config->SetPipeline(blackmagicRawPipelineCUDA, g_cuda_context, nullptr);
-                config->Release();
-                if (SUCCEEDED(hr)) {
-                    g_gpu_pipeline_ready = true;
-                    std::cerr << "GPU pipeline ready (CUDA)" << std::endl;
-                    return true;
-                } else {
-                    log_hresult("SetPipeline(CUDA) failed", hr);
-                }
-            } else {
-                log_hresult("Failed to get IBlackmagicRawConfiguration", hr);
-            }
-            cuCtxDestroy(ctx);
-            g_cuda_context = nullptr;
-        }
-        return false;
-    }
-
-    void release_gpu() {
-        if (g_cuda_context) {
-            cuCtxDestroy(static_cast<CUcontext>(g_cuda_context));
-            g_cuda_context = nullptr;
-        }
-        g_gpu_pipeline_ready = false;
-    }
-#endif
-
     bool ensure_com() {
         if (com_initialized) {
             return true;
@@ -352,10 +248,6 @@ struct BrawDecoder::Impl {
                 log_hresult("Failed to create IBlackmagicRaw", hr);
                 return false;
             }
-
-#ifdef CUDA_AVAILABLE
-            init_gpu_pipeline();
-#endif
         }
         return true;
     }
@@ -379,9 +271,6 @@ struct BrawDecoder::Impl {
             codec->Release();
             codec = nullptr;
         }
-#ifdef CUDA_AVAILABLE
-        release_gpu();
-#endif
         if (factory) {
             factory->Release();
             factory = nullptr;

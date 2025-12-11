@@ -8,7 +8,9 @@
       "Bash(python patch_parse_frames.py:*)",
       "Bash(python patch_frame_range_fix.py:*)",
       "Bash(python patch_open_folder.py:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git revert:*)",
+      "Bash(cmake --build:*)"
     ],
     "deny": [],
     "ask": []
