@@ -91,7 +91,7 @@ class FarmDatabase:
 
     # 클레임 타임아웃 (초)
     CLAIM_TIMEOUT_SEC = 180  # 3분
-    HEARTBEAT_TIMEOUT_SEC = 120  # 2분
+    HEARTBEAT_TIMEOUT_SEC = 300  # 2분
 
     def __init__(self, db_path: str):
         self.db_path = Path(db_path)
@@ -410,6 +410,18 @@ class FarmDatabase:
 
     # ===== Frame 관리 (핵심: 원자적 클레임) =====
 
+
+    def get_pending_frame_count(self, pool_id: str) -> int:
+        """해당 풀의 대기 중인 프레임 수"""
+        conn = self._get_connection()
+        result = conn.execute("""
+            SELECT COUNT(*) as cnt FROM frames f
+            JOIN jobs j ON f.job_id = j.job_id
+            WHERE j.pool_id = ? AND j.status NOT IN ('excluded', 'paused', 'completed')
+              AND f.status = 'pending'
+        """, (pool_id,)).fetchone()
+        return result['cnt'] if result else 0
+
     def claim_frames(self, pool_id: str, worker_id: str, batch_size: int = 10) -> Optional[Tuple[str, int, int, str]]:
         """프레임 범위 클레임 (원자적 처리)
 
@@ -478,10 +490,15 @@ class FarmDatabase:
         """프레임 범위 완료 처리"""
         now = datetime.now().isoformat()
         conn = self._get_connection()
-        conn.execute("""
+
+        # 완료 처리 (worker_id 조건 제거 - 중요!)
+        cursor = conn.execute("""
             UPDATE frames SET status = 'completed', completed_at = ?
-            WHERE job_id = ? AND eye = ? AND frame_idx BETWEEN ? AND ? AND worker_id = ?
-        """, (now, job_id, eye, start_frame, end_frame, worker_id))
+            WHERE job_id = ? AND eye = ? AND frame_idx BETWEEN ? AND ?
+              AND status IN ('claimed', 'pending')
+        """, (now, job_id, eye, start_frame, end_frame))
+
+        updated = cursor.rowcount
 
         # 작업 완료 여부 확인
         remaining = conn.execute("""
@@ -492,6 +509,11 @@ class FarmDatabase:
         if remaining == 0:
             conn.execute("UPDATE jobs SET status = 'completed' WHERE job_id = ?", (job_id,))
 
+        # 명시적 commit (안전을 위해)
+        conn.commit()
+
+        return updated
+
     def release_frames(self, job_id: str, start_frame: int, end_frame: int, eye: str, worker_id: str):
         """프레임 범위 클레임 해제 (실패 시)"""
         conn = self._get_connection()
@@ -500,6 +522,7 @@ class FarmDatabase:
                    retry_count = retry_count + 1
             WHERE job_id = ? AND eye = ? AND frame_idx BETWEEN ? AND ? AND worker_id = ?
         """, (job_id, eye, start_frame, end_frame, worker_id))
+        conn.commit()
 
     def get_job_progress(self, job_id: str) -> Dict[str, int]:
         """작업 진행률"""
@@ -535,17 +558,20 @@ class FarmDatabase:
         return result
 
     def get_active_workers(self) -> List[Worker]:
-        """활성 워커 목록 (최근 하트비트)"""
+        """모든 워커 목록 (오프라인 포함, 24시간 이내)"""
         conn = self._get_connection()
         timeout = (datetime.now() - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SEC)).isoformat()
+        day_ago = (datetime.now() - timedelta(hours=24)).isoformat()
 
         rows = conn.execute("""
             SELECT *,
                    CASE WHEN last_heartbeat < ? THEN 'offline' ELSE status END as actual_status
             FROM workers
-            WHERE last_heartbeat >= ? OR status != 'offline'
-            ORDER BY pool_id, hostname
-        """, (timeout, timeout)).fetchall()
+            WHERE last_heartbeat >= ?
+            ORDER BY
+                CASE WHEN last_heartbeat >= ? THEN 0 ELSE 1 END,
+                pool_id, hostname
+        """, (timeout, day_ago, timeout)).fetchall()
 
         return [Worker(
             worker_id=r['worker_id'],
@@ -704,7 +730,7 @@ class FarmDatabase:
 _db_instance: Optional[FarmDatabase] = None
 
 # 기본 DB 경로 (환경변수 또는 기본값)
-DEFAULT_DB_PATH = os.environ.get('BRAW_FARM_DB', 'P:/00-GIGA/BRAW_CLI/farm.db')
+DEFAULT_DB_PATH = os.environ.get('BRAW_FARM_DB', 'P:/99-Pipeline/Blackmagic/Braw_convert_Project/farm.db')
 
 
 def get_default_db_path() -> str:

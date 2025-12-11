@@ -330,6 +330,14 @@ class WorkerThreadV2(QThread):
         self.total_success = 0
         self.total_failed = 0
 
+
+    def get_pending_frame_count(self) -> int:
+        """대기 중인 프레임 수 조회"""
+        try:
+            return self.farm_manager.db.get_pending_frame_count(self.farm_manager.current_pool_id)
+        except:
+            return 9999  # 오류시 기본값 (제한 없음)
+
     def run(self):
         """워커 실행 - 병렬 처리"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -354,9 +362,22 @@ class WorkerThreadV2(QThread):
                     if len(futures) == 0:
                         self.farm_manager.cleanup_offline_workers()
 
+                    # 남은 프레임 수에 따라 동적 병렬 수 조절
+                    pending_frames = self.get_pending_frame_count()
+                    batch_size = settings.batch_frame_size
+
+                    # 남은 프레임이 적으면 병렬 수 제한
+                    # 예: 120프레임 남음, batch=10 -> 최대 12개 병렬
+                    # 예: 30프레임 남음, batch=10 -> 최대 3개 병렬
+                    if pending_frames > 0:
+                        max_effective_workers = max(1, (pending_frames + batch_size - 1) // batch_size)
+                        effective_workers = min(self.parallel_workers, max_effective_workers)
+                    else:
+                        effective_workers = self.parallel_workers
+
                     # 빈 슬롯만큼 작업 클레임
-                    while len(futures) < self.parallel_workers and self.is_running:
-                        claimed = self.farm_manager.claim_frames(settings.batch_frame_size)
+                    while len(futures) < effective_workers and self.is_running:
+                        claimed = self.farm_manager.claim_frames(batch_size)
 
                         if claimed:
                             idle_logged = False
@@ -378,6 +399,10 @@ class WorkerThreadV2(QThread):
                             futures[future] = (job_id, start_frame, end_frame, eye, job)
                         else:
                             break
+
+                    # 주기적 하트비트 업데이트 (작업 중에도)
+                    if futures:
+                        self.farm_manager.update_heartbeat("active", None, self.total_success)
 
                     # 완료된 작업 처리
                     if futures:
@@ -434,7 +459,8 @@ class WorkerThreadV2(QThread):
         self.is_running = False
 
     def process_frame_range(self, job: Job, start_frame: int, end_frame: int, eye: str) -> bool:
-        """프레임 범위 처리"""
+        """프레임 범위 처리 (실시간 진행률 포함)"""
+        import threading
         output_dir = Path(job.output_dir)
 
         # 출력 디렉토리 생성
@@ -470,8 +496,43 @@ class WorkerThreadV2(QThread):
         if job.use_stmap and job.stmap_path:
             cmd.append(f"--stmap={job.stmap_path}")
 
+        frame_count = end_frame - start_frame + 1
+        stop_monitor = threading.Event()
+        last_progress = [0]  # mutable for closure
+
+        def monitor_progress():
+            """출력 파일 감시하여 진행률 표시"""
+            import time
+            while not stop_monitor.is_set():
+                completed = 0
+                for frame_idx in range(start_frame, end_frame + 1):
+                    check_path = self.farm_manager.get_output_file_path(job, frame_idx, eye)
+                    if check_path.exists():
+                        completed += 1
+
+                if completed > last_progress[0]:
+                    last_progress[0] = completed
+                    pct = (completed / frame_count) * 100
+
+                    # 전체 작업 진행률도 조회
+                    try:
+                        total_progress = self.farm_manager.get_job_progress(job.job_id)
+                        total_done = total_progress['completed'] + completed
+                        total_all = total_progress['total']
+                        total_pct = (total_done / total_all * 100) if total_all > 0 else 0
+                        self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.0f}%) | 전체: {total_done}/{total_all} ({total_pct:.0f}%)")
+                    except:
+                        self.log_signal.emit(f"  📊 [{start_frame}-{end_frame}] {eye.upper()}: {completed}/{frame_count} ({pct:.0f}%)")
+
+                if completed >= frame_count:
+                    break
+                time.sleep(2)  # 2초마다 체크
+
+        # 진행률 모니터 스레드 시작
+        monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
+        monitor_thread.start()
+
         try:
-            frame_count = end_frame - start_frame + 1
             # 프레임당 60초 + 기본 300초 (SBS는 2배)
             base_timeout = 300 + (frame_count * 60)
             if eye == "sbs":
@@ -488,9 +549,18 @@ class WorkerThreadV2(QThread):
                 creationflags=SUBPROCESS_FLAGS
             )
 
+            # CLI 실행 결과 확인
+            if result.returncode != 0:
+                err_msg = result.stderr[:200] if result.stderr else "no stderr"
+                self.log_signal.emit(f"  ⚠️ CLI 오류 (code={result.returncode}): {err_msg}")
+
             # 첫 프레임 파일 존재 확인
             check_file = self.farm_manager.get_output_file_path(job, start_frame, eye)
-            return check_file.exists()
+            if check_file.exists():
+                return True
+            else:
+                self.log_signal.emit(f"  ⚠️ 출력 파일 없음: {check_file}")
+                return False
 
         except subprocess.TimeoutExpired:
             self.log_signal.emit(f"  ⏰ 타임아웃")
@@ -498,6 +568,9 @@ class WorkerThreadV2(QThread):
         except Exception as e:
             self.log_signal.emit(f"  ❌ 오류: {str(e)}")
             return False
+        finally:
+            stop_monitor.set()
+            monitor_thread.join(timeout=1)
 
 
 class FarmUIV2(QMainWindow):
@@ -511,8 +584,8 @@ class FarmUIV2(QMainWindow):
         self.resize(1800, 1100)
 
         # DB 경로 (환경변수 우선)
-        from .farm_db import get_default_db_path
-        db_path = get_default_db_path()
+        # DB 경로는 settings에서
+        db_path = settings.db_path
         self.farm_manager = create_farm_manager(db_path)
 
         # 윈도우 제목에 DB 경로 표시
@@ -633,9 +706,11 @@ class FarmUIV2(QMainWindow):
         toolbar_layout.addStretch()
 
         # DB 경로 표시
-        db_label = QLabel(f"DB: {settings.farm_root}/farm.db")
-        db_label.setStyleSheet("color: #888; font-size: 9pt;")
-        toolbar_layout.addWidget(db_label)
+        self.db_label = QPushButton(f"DB: {settings.db_path}")
+        self.db_label.setStyleSheet("color: #888; font-size: 9pt;")
+        self.db_label.setToolTip("클릭하여 DB 경로 변경")
+        self.db_label.clicked.connect(self.change_db_path)
+        toolbar_layout.addWidget(self.db_label)
 
         settings_btn = QPushButton("⚙️ 설정")
         settings_btn.clicked.connect(self.show_settings)
@@ -744,6 +819,19 @@ class FarmUIV2(QMainWindow):
         frame_layout.addStretch()
         layout.addLayout(frame_layout)
 
+        # SpinBox 값 변경시 라벨 즉시 업데이트
+        self.start_frame_spin.valueChanged.connect(self.update_frame_range_label)
+        self.end_frame_spin.valueChanged.connect(self.update_frame_range_label)
+
+        # 커스텀 프레임 (빠진 프레임 채우기)
+        custom_layout = QHBoxLayout()
+        custom_layout.addWidget(QLabel("커스텀:"))
+        self.custom_frames_input = QLineEdit()
+        self.custom_frames_input.setPlaceholderText("예: 509, 540, 602, 1675-1679, 1707")
+        self.custom_frames_input.setToolTip("개별 프레임 또는 범위 입력 (쉼표로 구분)")
+        custom_layout.addWidget(self.custom_frames_input)
+        layout.addLayout(custom_layout)
+
         # 우선순위
         priority_layout = QHBoxLayout()
         priority_layout.addWidget(QLabel("우선순위:"))
@@ -787,12 +875,22 @@ class FarmUIV2(QMainWindow):
         self.start_btn = QPushButton("▶️ 시작")
         self.start_btn.setStyleSheet("background-color: #0d7377;")
         self.start_btn.clicked.connect(self.start_worker)
-        self.stop_btn = QPushButton("⏹️ 중지")
-        self.stop_btn.setStyleSheet("background-color: #d9534f;")
-        self.stop_btn.clicked.connect(self.stop_worker)
-        self.stop_btn.setEnabled(False)
+
+        self.soft_stop_btn = QPushButton("⏸️ 소프트")
+        self.soft_stop_btn.setStyleSheet("background-color: #f0ad4e;")
+        self.soft_stop_btn.setToolTip("현재 작업 완료 후 중지")
+        self.soft_stop_btn.clicked.connect(self.soft_stop_worker)
+        self.soft_stop_btn.setEnabled(False)
+
+        self.hard_stop_btn = QPushButton("⛔ 하드")
+        self.hard_stop_btn.setStyleSheet("background-color: #d9534f;")
+        self.hard_stop_btn.setToolTip("모든 프로세스 즉시 종료")
+        self.hard_stop_btn.clicked.connect(self.hard_stop_worker)
+        self.hard_stop_btn.setEnabled(False)
+
         btn_layout.addWidget(self.start_btn)
-        btn_layout.addWidget(self.stop_btn)
+        btn_layout.addWidget(self.soft_stop_btn)
+        btn_layout.addWidget(self.hard_stop_btn)
         layout.addLayout(btn_layout)
 
         # 진행률
@@ -812,13 +910,14 @@ class FarmUIV2(QMainWindow):
         layout = QVBoxLayout(group)
 
         self.jobs_table = QTableWidget()
-        self.jobs_table.setColumnCount(10)
+        self.jobs_table.setColumnCount(11)
         self.jobs_table.setHorizontalHeaderLabels([
-            "작업 ID", "클립", "풀", "상태", "L", "R", "SBS", "진행률", "우선순위", "생성"
+            "작업 ID", "클립", "프레임", "풀", "상태", "L", "R", "SBS", "진행률", "우선순위", "생성"
         ])
         self.jobs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.jobs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        for i in [2, 3, 4, 5, 6, 7, 8, 9]:
+        self.jobs_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for i in [3, 4, 5, 6, 7, 8, 9, 10]:
             self.jobs_table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
         self.jobs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.jobs_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -894,6 +993,24 @@ class FarmUIV2(QMainWindow):
         dialog.exec()
         self.refresh_pools()
 
+
+    def change_db_path(self):
+        """DB 경로 변경"""
+        from PySide6.QtWidgets import QFileDialog
+        new_path, _ = QFileDialog.getSaveFileName(
+            self, "DB 파일 선택",
+            settings.db_path,
+            "SQLite DB (*.db);;All Files (*.*)"
+        )
+        if new_path:
+            settings.db_path = new_path
+            settings.save()
+            self.db_label.setText(f"DB: {new_path}")
+            QMessageBox.information(
+                self, "DB 경로 변경",
+                f"DB 경로가 변경되었습니다:\n{new_path}\n\n프로그램을 재시작하면 적용됩니다."
+            )
+
     def show_settings(self):
         """설정 다이얼로그"""
         dialog = SettingsDialog(self)
@@ -944,10 +1061,41 @@ class FarmUIV2(QMainWindow):
         if clip_path and clip_path in self.clip_frame_cache:
             frame_count = self.clip_frame_cache[clip_path]
             if frame_count > 0:
-                self.frame_info_label.setText(f"(0-{frame_count - 1})")
-                self.end_frame_spin.setMaximum(frame_count)
+                # 최대값 설정
+                self.end_frame_spin.setMaximum(frame_count - 1)
+                self.start_frame_spin.setMaximum(frame_count - 1)
+                # 라벨 업데이트
+                self.update_frame_range_label()
             else:
                 self.frame_info_label.setText("(정보 없음)")
+
+    def update_frame_range_label(self):
+        """SpinBox 값 변경시 프레임 범위 라벨 즉시 업데이트"""
+        start = self.start_frame_spin.value()
+        end = self.end_frame_spin.value()
+
+        # 현재 선택된 파일의 전체 프레임 수 확인
+        current = self.file_list.currentItem()
+        if current:
+            clip_path = current.data(Qt.UserRole)
+            if clip_path and clip_path in self.clip_frame_cache:
+                max_frame = self.clip_frame_cache[clip_path] - 1
+
+                # 0-0이면 전체 범위 표시
+                if start == 0 and end == 0:
+                    self.frame_info_label.setText(f"(0-{max_frame})")
+                else:
+                    # 사용자 지정 범위 표시
+                    actual_end = end if end > 0 else max_frame
+                    self.frame_info_label.setText(f"({start}-{actual_end})")
+                return
+
+        # 파일 미선택시 또는 캐시 없을 때
+        if start == 0 and end == 0:
+            self.frame_info_label.setText("(0=전체)")
+        else:
+            actual_end = end if end > 0 else "끝"
+            self.frame_info_label.setText(f"({start}-{actual_end})")
 
     def on_clear_files(self):
         """파일 목록 지우기"""
@@ -960,6 +1108,55 @@ class FarmUIV2(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if folder:
             self.output_input.setText(folder)
+
+
+    def parse_custom_frames(self, input_text: str) -> list:
+        """커스텀 프레임 문자열 파싱
+
+        입력 예: "509, 540, 602, 1675-1679, 1707"
+        출력: [(509, 509), (540, 540), (602, 602), (1675, 1679), (1707, 1707)]
+        """
+        if not input_text.strip():
+            return []
+
+        import re
+
+        # 다양한 하이픈/대시 문자를 일반 하이픈으로 정규화
+        # 엔 대시, 엠 대시, 전각 하이픈, 마이너스, 틸드 등
+        normalized = re.sub(r'[\u2013\u2014\uFF0D\u2010\u2011\u2012\u2015\u2212~]', '-', input_text)
+        # 전각 쉼표, 세미콜론도 쉼표로
+        normalized = re.sub(r'[\uFF0C;\uFF1B]', ',', normalized)
+
+        result = []
+        parts = normalized.replace(" ", "").split(",")
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            if "-" in part:
+                # 범위: 1675-1679
+                try:
+                    start, end = part.split("-", 1)
+                    start_frame = int(start)
+                    end_frame = int(end)
+                    if start_frame <= end_frame:
+                        result.append((start_frame, end_frame))
+                    else:
+                        # 역순이면 자동 수정
+                        result.append((end_frame, start_frame))
+                except ValueError:
+                    self.append_worker_log(f"\u26a0\ufe0f \uc798\ubabb\ub41c \ubc94\uc704: {part}")
+            else:
+                # 개별 프레임: 509
+                try:
+                    frame = int(part)
+                    result.append((frame, frame))
+                except ValueError:
+                    self.append_worker_log(f"\u26a0\ufe0f \uc798\ubabb\ub41c \ud504\ub808\uc784: {part}")
+
+        return result
 
     def submit_job(self):
         """작업 제출"""
@@ -1000,11 +1197,45 @@ class FarmUIV2(QMainWindow):
                 self.append_worker_log(f"⚠️ 프레임 수 확인 실패: {clip_name}")
                 continue
 
-            # 프레임 범위 결정 (0이면 전체)
+            # 커스텀 프레임 확인
+            custom_text = self.custom_frames_input.text().strip()
+            custom_ranges = self.parse_custom_frames(custom_text) if custom_text else []
+
+            # 커스텀 프레임이 있으면 각 범위별로 작업 제출
+            if custom_ranges:
+                clip_output = str(Path(output_dir) / clip_name) if settings.render_clip_folder else output_dir
+
+                for start_frame, end_frame in custom_ranges:
+                    # 범위 검증
+                    if start_frame >= frame_count or end_frame >= frame_count:
+                        self.append_worker_log(f"⚠️ 프레임 범위 초과: {start_frame}-{end_frame} (최대: {frame_count-1})")
+                        continue
+
+                    job_id = self.farm_manager.submit_job(
+                        clip_path=clip_path,
+                        output_dir=clip_output,
+                        start_frame=start_frame,
+                        end_frame=end_frame,
+                        eyes=eyes,
+                        format="exr" if settings.render_format_exr else "ppm",
+                        separate_folders=self.separate_check.isChecked(),
+                        use_aces=self.aces_check.isChecked(),
+                        color_input_space=settings.color_input_space,
+                        color_output_space=settings.color_output_space,
+                        use_stmap=settings.render_use_stmap,
+                        stmap_path=settings.stmap_path,
+                        priority=self.priority_spin.value()
+                    )
+                    if job_id:
+                        submitted += 1
+                        self.append_worker_log(f"📤 커스텀 제출: {clip_name} [{start_frame}-{end_frame}]")
+                continue  # 다음 클립으로
+
+            # 일반 프레임 범위 결정 (0이면 전체)
             user_start = self.start_frame_spin.value()
             user_end = self.end_frame_spin.value()
-            start_frame = user_start if user_start > 0 else 0
-            end_frame = (user_end - 1) if user_end > 0 else (frame_count - 1)
+            start_frame = user_start  # 0이면 처음부터
+            end_frame = user_end if user_end > 0 else (frame_count - 1)  # 0이면 끝까지
 
             # 범위 검증
             if start_frame >= frame_count:
@@ -1071,8 +1302,12 @@ class FarmUIV2(QMainWindow):
             clip_name = Path(job.clip_path).stem
             self.jobs_table.setItem(row, 1, QTableWidgetItem(clip_name))
 
+            # 프레임 범위
+            frame_range = f"{job.start_frame}-{job.end_frame}"
+            self.jobs_table.setItem(row, 2, QTableWidgetItem(frame_range))
+
             # 풀
-            self.jobs_table.setItem(row, 2, QTableWidgetItem(job.pool_id))
+            self.jobs_table.setItem(row, 3, QTableWidgetItem(job.pool_id))
 
             # 상태
             status_text = {
@@ -1083,11 +1318,11 @@ class FarmUIV2(QMainWindow):
                 'paused': '⏯️ 일시정지',
                 'failed': '❌ 실패'
             }.get(status, status)
-            self.jobs_table.setItem(row, 3, QTableWidgetItem(status_text))
+            self.jobs_table.setItem(row, 4, QTableWidgetItem(status_text))
 
             # 눈별 진행률 (L, R, SBS)
             eye_progress = self.farm_manager.get_job_eye_progress(job.job_id)
-            for col, eye in [(4, 'left'), (5, 'right'), (6, 'sbs')]:
+            for col, eye in [(5, 'left'), (6, 'right'), (7, 'sbs')]:
                 if eye in eye_progress:
                     ep = eye_progress[eye]
                     pct = (ep['completed'] / ep['total'] * 100) if ep['total'] > 0 else 0
@@ -1097,13 +1332,13 @@ class FarmUIV2(QMainWindow):
 
             # 전체 진행률
             pct = (completed / total * 100) if total > 0 else 0
-            self.jobs_table.setItem(row, 7, QTableWidgetItem(f"{completed}/{total} ({pct:.1f}%)"))
+            self.jobs_table.setItem(row, 8, QTableWidgetItem(f"{completed}/{total} ({pct:.1f}%)"))
 
             # 우선순위
-            self.jobs_table.setItem(row, 8, QTableWidgetItem(str(job.priority)))
+            self.jobs_table.setItem(row, 9, QTableWidgetItem(str(job.priority)))
 
             # 생성일
-            self.jobs_table.setItem(row, 9, QTableWidgetItem(
+            self.jobs_table.setItem(row, 10, QTableWidgetItem(
                 job.created_at.strftime("%m/%d %H:%M")
             ))
 
@@ -1139,6 +1374,13 @@ class FarmUIV2(QMainWindow):
         job_ids = [self.jobs_table.item(row, 0).text() for row in rows]
 
         menu = QMenu(self)
+
+        # 출력 폴더 열기 (단일 선택시)
+        if len(job_ids) == 1:
+            open_folder_action = QAction("📂 출력 폴더 열기", self)
+            open_folder_action.triggered.connect(lambda: self.open_job_output_folder(job_ids[0]))
+            menu.addAction(open_folder_action)
+            menu.addSeparator()
 
         # 상태 변경
         exclude_action = QAction("⏸️ 제외", self)
@@ -1182,6 +1424,26 @@ class FarmUIV2(QMainWindow):
         menu.addAction(delete_action)
 
         menu.exec(self.jobs_table.viewport().mapToGlobal(position))
+
+
+    def open_job_output_folder(self, job_id: str):
+        """작업의 출력 폴더 열기"""
+        job = self.farm_manager.get_job(job_id)
+        if job:
+            output_path = Path(job.output_dir)
+            if output_path.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_path)))
+                self.append_worker_log(f"📂 폴더 열기: {output_path}")
+            else:
+                # 상위 폴더 시도
+                parent = output_path.parent
+                if parent.exists():
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(parent)))
+                    self.append_worker_log(f"📂 상위 폴더 열기: {parent}")
+                else:
+                    QMessageBox.warning(self, "오류", f"폴더가 존재하지 않습니다:\n{output_path}")
+        else:
+            QMessageBox.warning(self, "오류", f"작업을 찾을 수 없습니다: {job_id}")
 
     def batch_job_action(self, job_ids: list, action: str):
         """배치 작업 처리"""
@@ -1240,27 +1502,75 @@ class FarmUIV2(QMainWindow):
         self.worker_thread.start()
 
         self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self.soft_stop_btn.setEnabled(True)
+        self.hard_stop_btn.setEnabled(True)
 
-    def stop_worker(self):
-        """워커 중지"""
+    def soft_stop_worker(self):
+        """소프트 중지 - 현재 작업 완료 후 중지"""
         if self.worker_thread:
             self.worker_thread.stop()
-            self.append_worker_log("⏳ 워커 중지 요청...")
-            self.stop_btn.setEnabled(False)
-            self.stop_btn.setText("⏳ 중지 중...")
-
-            # 종료 대기
+            self.append_worker_log("⏸️ 소프트 중지 요청 - 현재 작업 완료 후 중지...")
+            self.soft_stop_btn.setEnabled(False)
+            self.soft_stop_btn.setText("⏳ 대기...")
             QTimer.singleShot(1000, self.check_worker_stopped)
+
+    def hard_stop_worker(self):
+        """하드 중지 - 모든 프로세스 즉시 종료"""
+        if self.worker_thread:
+            self.worker_thread.stop()
+            self.append_worker_log("⛔ 하드 중지 - 모든 프로세스 강제 종료...")
+
+            # braw_cli 프로세스 강제 종료
+            self.kill_braw_processes()
+
+            self.soft_stop_btn.setEnabled(False)
+            self.hard_stop_btn.setEnabled(False)
+            self.hard_stop_btn.setText("⏳ 종료중...")
+
+            # 워커 스레드 강제 종료
+            if self.worker_thread.isRunning():
+                self.worker_thread.terminate()
+                self.worker_thread.wait(3000)
+
+            self.reset_stop_buttons()
+            self.append_worker_log("⛔ 하드 중지 완료")
+
+    def kill_braw_processes(self):
+        """braw_cli 관련 프로세스 강제 종료"""
+        import subprocess
+        try:
+            # braw_cli.exe 프로세스 종료
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "braw_cli.exe"],
+                capture_output=True, timeout=10
+            )
+            self.append_worker_log("  - braw_cli.exe 프로세스 종료됨")
+        except Exception as e:
+            self.append_worker_log(f"  - braw_cli 종료 오류: {e}")
+
+        try:
+            # cli_cuda.exe 프로세스도 종료 (있을 경우)
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "cli_cuda.exe"],
+                capture_output=True, timeout=10
+            )
+        except:
+            pass
 
     def check_worker_stopped(self):
         """워커 종료 확인"""
         if self.worker_thread and self.worker_thread.isRunning():
             QTimer.singleShot(1000, self.check_worker_stopped)
         else:
-            self.start_btn.setEnabled(True)
-            self.stop_btn.setText("⏹️ 중지")
-            self.stop_btn.setEnabled(False)
+            self.reset_stop_buttons()
+
+    def reset_stop_buttons(self):
+        """중지 버튼 상태 리셋"""
+        self.start_btn.setEnabled(True)
+        self.soft_stop_btn.setText("⏸️ 소프트")
+        self.soft_stop_btn.setEnabled(False)
+        self.hard_stop_btn.setText("⛔ 하드")
+        self.hard_stop_btn.setEnabled(False)
 
     def update_progress(self, completed: int, total: int):
         """진행률 업데이트"""

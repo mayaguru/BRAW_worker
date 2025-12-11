@@ -60,7 +60,8 @@ class FarmSettings:
         self._lock = threading.RLock()  # 재진입 가능 락
 
         # 기본 설정
-        self.farm_root = "P:/00-GIGA/BRAW_CLI"  # 공용 렌더팜 저장소
+        self.farm_root = "P:/99-Pipeline/Blackmagic/Braw_convert_Project"  # 공용 렌더팜 저장소
+        self.db_path = "P:/99-Pipeline/Blackmagic/Braw_convert_Project/farm.db"  # DB 경로
         self.cli_path = "P:/00-GIGA/BRAW_CLI/build/bin/braw_cli.exe"  # CLI 실행 파일 경로
         self.parallel_workers = 16
         self.max_retries = 5  # 최대 재시도 횟수
@@ -104,6 +105,7 @@ class FarmSettings:
                     with open(self.config_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         self.farm_root = data.get("farm_root", self.farm_root)
+                        self.db_path = data.get("db_path", self.db_path)
                         self.cli_path = data.get("cli_path", self.cli_path)
                         self.parallel_workers = data.get("parallel_workers", self.parallel_workers)
                         self.max_retries = data.get("max_retries", self.max_retries)
@@ -139,6 +141,7 @@ class FarmSettings:
                 # 설정 저장
                 data = {
                     "farm_root": self.farm_root,
+                    "db_path": self.db_path,
                     "cli_path": self.cli_path,
                     "parallel_workers": self.parallel_workers,
                     "max_retries": self.max_retries,
@@ -169,6 +172,7 @@ class FarmSettings:
         """딕셔너리로 변환"""
         return {
             "farm_root": self.farm_root,
+            "db_path": self.db_path,
             "cli_path": self.cli_path,
             "parallel_workers": self.parallel_workers,
             "last_output_folder": self.last_output_folder
