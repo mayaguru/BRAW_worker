@@ -95,8 +95,8 @@ class FarmSettings:
 
         # SeqChecker 설정
         self.seqchecker_path = "P:/00-GIGA/BRAW_CLI/tool/SeqChecker/seqchecker.exe"
-        self.seqchecker_auto_scan = True  # 작업 완료 후 자동 스캔
-        self.seqchecker_auto_rerender = True  # 오류 프레임 자동 재렌더 잡 생성
+        self.seqchecker_auto_scan = False  # 작업 완료 후 자동 스캔 (수동 스캔만 사용)
+        self.seqchecker_auto_rerender = False  # 오류 프레임 자동 재렌더 잡 생성
 
         # 설정 파일 경로 (로컬 - 내 문서)
         # Windows: C:\Users\사용자명\Documents\BRAW Farm\config.json
