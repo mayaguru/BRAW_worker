@@ -1964,10 +1964,16 @@ class FarmUI(QMainWindow):
 
     def restart_status_thread(self):
         """상태 업데이트 스레드 재시작 (작업 폴더 변경 시)"""
-        # 기존 스레드 중지
+        # 기존 스레드 중지 및 시그널 해제
         if self.status_thread:
             self.status_thread.stop()
             self.status_thread.wait(3000)
+            # 시그널 명시적 해제 (안전을 위해)
+            try:
+                self.status_thread.workers_signal.disconnect()
+                self.status_thread.jobs_signal.disconnect()
+            except RuntimeError:
+                pass  # 이미 해제된 경우 무시
 
         # 새 스레드 시작 (새 farm_manager 사용)
         self.status_thread = StatusUpdateThread(self.farm_manager)
