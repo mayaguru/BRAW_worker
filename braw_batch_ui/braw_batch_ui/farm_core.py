@@ -194,6 +194,11 @@ class WorkerInfo:
 
 class RenderJob:
     """렌더 작업 정보"""
+    # 상태 상수
+    STATUS_ACTIVE = "active"      # 활성 (처리 대상)
+    STATUS_EXCLUDED = "excluded"  # 제외됨 (처리 안함)
+    STATUS_PAUSED = "paused"      # 일시정지
+
     def __init__(self, job_id: str):
         self.job_id = job_id
         self.clip_path = ""
@@ -208,6 +213,7 @@ class RenderJob:
         self.color_output_space = "ACEScg"  # 출력 색공간
         self.use_stmap = False  # STMAP 왜곡 보정 사용 여부
         self.stmap_path = ""  # STMAP EXR 파일 경로
+        self.status = RenderJob.STATUS_ACTIVE  # 작업 상태
         self.created_at = datetime.now()
         self.created_by = socket.gethostname()
 
@@ -226,6 +232,7 @@ class RenderJob:
             "color_output_space": self.color_output_space,
             "use_stmap": self.use_stmap,
             "stmap_path": self.stmap_path,
+            "status": self.status,
             "created_at": self.created_at.isoformat(),
             "created_by": self.created_by
         }
@@ -245,6 +252,7 @@ class RenderJob:
         job.color_output_space = data.get("color_output_space", "ACEScg")
         job.use_stmap = data.get("use_stmap", False)  # 기본값 False
         job.stmap_path = data.get("stmap_path", "")
+        job.status = data.get("status", RenderJob.STATUS_ACTIVE)  # 기본값 active
         job.created_at = datetime.fromisoformat(data["created_at"])
         job.created_by = data["created_by"]
         return job
@@ -441,13 +449,16 @@ class FarmManager:
         return safe_json_read(job_file)
 
     def get_pending_jobs(self) -> List[RenderJob]:
-        """대기중인 작업 목록 (15대 동시 운영 최적화)"""
+        """대기중인 작업 목록 (excluded 상태 제외)"""
         jobs = []
         for job_file in self.config.jobs_dir.glob("*.json"):
             data = safe_json_read(job_file)
             if data:
                 try:
-                    jobs.append(RenderJob.from_dict(data))
+                    job = RenderJob.from_dict(data)
+                    # excluded 상태 작업은 제외
+                    if job.status != RenderJob.STATUS_EXCLUDED:
+                        jobs.append(job)
                 except (KeyError, TypeError, ValueError):
                     pass  # 손상된 데이터 무시
         return jobs
@@ -469,8 +480,10 @@ class FarmManager:
                     total = job.get_total_tasks()
                     completed = progress.get('completed', 0)
 
-                    # 상태 결정
-                    if completed >= total and total > 0:
+                    # 상태 결정 (excluded 상태 우선)
+                    if job.status == RenderJob.STATUS_EXCLUDED:
+                        status = 'excluded'
+                    elif completed >= total and total > 0:
                         status = 'completed'
                     elif completed > 0:
                         status = 'in_progress'
@@ -481,8 +494,8 @@ class FarmManager:
                 except (KeyError, TypeError, ValueError):
                     pass
 
-        # 정렬: in_progress > pending > completed, 그 다음 job_id 기준
-        status_order = {'in_progress': 0, 'pending': 1, 'completed': 2}
+        # 정렬: in_progress > pending > completed > excluded, 그 다음 job_id 기준
+        status_order = {'in_progress': 0, 'pending': 1, 'completed': 2, 'excluded': 3}
         result.sort(key=lambda x: (status_order.get(x[1], 3), x[0].job_id))
         return result
 
@@ -582,10 +595,24 @@ class FarmManager:
             self.release_claim(job.job_id, frame_idx, eye)
             return False
 
-    def is_frame_completed(self, job_id: str, frame_idx: int, eye: str) -> bool:
-        """프레임 완료 여부 확인"""
+    def is_frame_completed(self, job_id: str, frame_idx: int, eye: str, job: 'RenderJob' = None) -> bool:
+        """프레임 완료 여부 확인 (.done 파일 기준, job 전달 시 실제 파일도 확인)"""
         completed_file = self.config.completed_dir / f"{job_id}_{frame_idx:06d}_{eye}.done"
-        return completed_file.exists()
+        if not completed_file.exists():
+            return False
+
+        # job이 전달되면 실제 출력 파일도 확인 (더 안전)
+        if job is not None:
+            output_file = self.get_output_file_path(job, frame_idx, eye)
+            if not output_file.exists():
+                # .done 파일은 있지만 실제 파일 없음 - .done 삭제하여 재처리 유도
+                try:
+                    completed_file.unlink(missing_ok=True)
+                except (OSError, IOError):
+                    pass
+                return False
+
+        return True
 
     def get_job_progress(self, job_id: str) -> Dict[str, int]:
         """작업 진행률"""
@@ -961,10 +988,10 @@ class FarmManager:
             range_end = min(range_start + batch_size - 1, job.end_frame)
 
             for eye in job.eyes:
-                # 이 범위가 이미 완료됐는지 빠르게 체크
+                # 이 범위가 이미 완료됐는지 체크 (실제 파일 존재 여부까지 확인)
                 all_completed = True
                 for frame_idx in range(range_start, range_end + 1):
-                    if not self.is_frame_completed(job.job_id, frame_idx, eye):
+                    if not self.is_frame_completed(job.job_id, frame_idx, eye, job):
                         all_completed = False
                         break
 
@@ -1059,28 +1086,36 @@ class FarmManager:
         except Exception as e:
             pass
 
-    def mark_job_completed(self, job_id: str):
-        """작업을 완료로 표시 (모든 프레임 완료 처리)"""
+    def mark_job_excluded(self, job_id: str):
+        """작업을 제외 상태로 표시 (처리 대상에서 제외)"""
+        self._set_job_status(job_id, RenderJob.STATUS_EXCLUDED)
+
+    def mark_job_active(self, job_id: str):
+        """작업을 활성 상태로 복원"""
+        self._set_job_status(job_id, RenderJob.STATUS_ACTIVE)
+
+    def _set_job_status(self, job_id: str, status: str):
+        """작업 상태 변경"""
         try:
-            # 작업 정보 가져오기
             job_file = self.config.jobs_dir / f"{job_id}.json"
             if not job_file.exists():
                 return
 
             with open(job_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                job = RenderJob.from_dict(data)
 
-            # 모든 프레임을 완료로 표시
-            for frame_idx in range(job.start_frame, job.end_frame + 1):
-                for eye in job.eyes:
-                    if not self.is_frame_completed(job_id, frame_idx, eye):
-                        completed_file = self.config.completed_dir / f"{job_id}_{frame_idx:06d}_{eye}.done"
-                        with open(completed_file, 'w') as f:
-                            f.write("manual_complete")
+            data["status"] = status
 
-            # 모든 클레임 해제
-            for claim_file in self.config.claims_dir.glob(f"{job_id}_*.json"):
-                claim_file.unlink(missing_ok=True)
+            with open(job_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # 제외 시 클레임만 해제 (빠름)
+            if status == RenderJob.STATUS_EXCLUDED:
+                for claim_file in self.config.claims_dir.glob(f"{job_id}_*.json"):
+                    claim_file.unlink(missing_ok=True)
         except Exception as e:
             pass
+
+    def mark_job_completed(self, job_id: str):
+        """작업을 제외 상태로 표시 (이전 호환성 유지, mark_job_excluded 호출)"""
+        self.mark_job_excluded(job_id)

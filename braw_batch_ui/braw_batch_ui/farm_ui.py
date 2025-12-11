@@ -2369,20 +2369,30 @@ class FarmUI(QMainWindow):
             reset_action.triggered.connect(lambda: self.reset_job(job_ids[0]))
             menu.addAction(reset_action)
 
-            # 완료 표시 액션
-            complete_action = QAction("✅ 완료로 표시", self)
+            # 제외 액션
+            complete_action = QAction("⏸️ 제외 (처리 안함)", self)
             complete_action.triggered.connect(lambda: self.mark_job_complete(job_ids[0]))
             menu.addAction(complete_action)
+
+            # 활성화 액션
+            activate_action = QAction("▶️ 활성화 (처리 재개)", self)
+            activate_action.triggered.connect(lambda: self.mark_job_active(job_ids[0]))
+            menu.addAction(activate_action)
         else:
             # 다중 리셋
             reset_action = QAction(f"🔄 선택한 {len(job_ids)}개 작업 리셋", self)
             reset_action.triggered.connect(lambda: self.reset_jobs(job_ids))
             menu.addAction(reset_action)
 
-            # 다중 완료 표시
-            complete_action = QAction(f"✅ 선택한 {len(job_ids)}개 작업 완료로 표시", self)
+            # 다중 제외
+            complete_action = QAction(f"⏸️ 선택한 {len(job_ids)}개 작업 제외", self)
             complete_action.triggered.connect(lambda: self.mark_jobs_complete(job_ids))
             menu.addAction(complete_action)
+
+            # 다중 활성화
+            activate_action = QAction(f"▶️ 선택한 {len(job_ids)}개 작업 활성화", self)
+            activate_action.triggered.connect(lambda: self.mark_jobs_active(job_ids))
+            menu.addAction(activate_action)
 
         menu.addSeparator()
 
@@ -2399,7 +2409,7 @@ class FarmUI(QMainWindow):
         menu.exec(self.jobs_table.viewport().mapToGlobal(position))
 
     def reset_job(self, job_id: str):
-        """작업 리셋"""
+        """작업 리셋 (비동기)"""
         reply = QMessageBox.question(
             self, "작업 리셋",
             f"작업 '{job_id}'의 진행 상태를 초기화하시겠습니까?\n"
@@ -2409,11 +2419,20 @@ class FarmUI(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            self.farm_manager.reset_job(job_id)
-            QMessageBox.information(self, "완료", f"작업 '{job_id}'이(가) 리셋되었습니다.")
+            self.append_worker_log(f"⏳ 작업 '{job_id}' 리셋 중...")
+            import concurrent.futures
+            def do_reset():
+                self.farm_manager.reset_job(job_id)
+                return job_id
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(do_reset)
+            future.add_done_callback(
+                lambda f: self.log_signal.emit(f"✅ 작업 '{f.result()}' 리셋됨") if f.result() else None
+            )
+            executor.shutdown(wait=False)
 
     def mark_job_complete(self, job_id: str):
-        """작업을 완료로 표시"""
+        """작업을 완료로 표시 (비동기)"""
         reply = QMessageBox.question(
             self, "완료로 표시",
             f"작업 '{job_id}'을(를) 완료로 표시하시겠습니까?\n"
@@ -2422,11 +2441,33 @@ class FarmUI(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            self.farm_manager.mark_job_completed(job_id)
-            QMessageBox.information(self, "완료", f"작업 '{job_id}'이(가) 완료로 표시되었습니다.")
+            self.append_worker_log(f"⏳ 작업 '{job_id}' 완료 표시 중...")
+            # 별도 스레드에서 실행
+            import concurrent.futures
+            def do_mark():
+                self.farm_manager.mark_job_completed(job_id)
+                return job_id
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(do_mark)
+            future.add_done_callback(
+                lambda f: self.log_signal.emit(f"✅ 작업 '{f.result()}' 완료 표시됨") if f.result() else None
+            )
+            executor.shutdown(wait=False)
 
+
+
+    def mark_job_active(self, job_id: str):
+        """작업을 활성 상태로 복원"""
+        self.farm_manager.mark_job_active(job_id)
+        self.append_worker_log(f"▶️ 작업 '{job_id}' 활성화됨")
+
+    def mark_jobs_active(self, job_ids: list):
+        """여러 작업을 활성 상태로 복원"""
+        for job_id in job_ids:
+            self.farm_manager.mark_job_active(job_id)
+        self.append_worker_log(f"▶️ {len(job_ids)}개 작업 활성화됨")
     def delete_job(self, job_id: str):
-        """작업 삭제"""
+        """작업 삭제 (비동기)"""
         reply = QMessageBox.question(
             self, "작업 삭제",
             f"작업 '{job_id}'을(를) 삭제하시겠습니까?\n"
@@ -2435,44 +2476,84 @@ class FarmUI(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            self.farm_manager.delete_job(job_id)
-            QMessageBox.information(self, "완료", f"작업 '{job_id}'이(가) 삭제되었습니다.")
+            self.append_worker_log(f"⏳ 작업 '{job_id}' 삭제 중...")
+            import concurrent.futures
+            def do_delete():
+                self.farm_manager.delete_job(job_id)
+                return job_id
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(do_delete)
+            future.add_done_callback(
+                lambda f: self.log_signal.emit(f"🗑️ 작업 '{f.result()}' 삭제됨") if f.result() else None
+            )
+            executor.shutdown(wait=False)
 
     def reset_jobs(self, job_ids: list):
-        """여러 작업 리셋"""
+        """여러 작업 리셋 (비동기)"""
         reply = QMessageBox.question(
             self, "작업 리셋",
             f"{len(job_ids)}개의 작업을 리셋하시겠습니까?\n모든 진행 상태가 초기화됩니다.",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            for job_id in job_ids:
-                self.farm_manager.reset_job(job_id)
-            QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 리셋되었습니다.")
+            count = len(job_ids)
+            self.append_worker_log(f"⏳ {count}개 작업 리셋 중...")
+            import concurrent.futures
+            def do_reset():
+                for job_id in job_ids:
+                    self.farm_manager.reset_job(job_id)
+                return count
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(do_reset)
+            future.add_done_callback(
+                lambda f: self.log_signal.emit(f"✅ {f.result()}개 작업 리셋됨") if f.result() else None
+            )
+            executor.shutdown(wait=False)
 
     def mark_jobs_complete(self, job_ids: list):
-        """여러 작업을 완료로 표시"""
+        """여러 작업을 완료로 표시 (비동기)"""
         reply = QMessageBox.question(
             self, "완료로 표시",
             f"{len(job_ids)}개의 작업을 완료로 표시하시겠습니까?",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            for job_id in job_ids:
-                self.farm_manager.mark_job_completed(job_id)
-            QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 완료로 표시되었습니다.")
+            count = len(job_ids)
+            self.append_worker_log(f"⏳ {count}개 작업 완료 표시 중...")
+            # 별도 스레드에서 실행
+            import concurrent.futures
+            def do_mark():
+                for job_id in job_ids:
+                    self.farm_manager.mark_job_completed(job_id)
+                return count
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(do_mark)
+            future.add_done_callback(
+                lambda f: self.log_signal.emit(f"✅ {f.result()}개 작업 완료 표시됨") if f.result() else None
+            )
+            executor.shutdown(wait=False)
 
     def delete_jobs(self, job_ids: list):
-        """여러 작업 삭제"""
+        """여러 작업 삭제 (비동기)"""
         reply = QMessageBox.question(
             self, "작업 삭제",
             f"{len(job_ids)}개의 작업을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            for job_id in job_ids:
-                self.farm_manager.delete_job(job_id)
-            QMessageBox.information(self, "완료", f"{len(job_ids)}개의 작업이 삭제되었습니다.")
+            count = len(job_ids)
+            self.append_worker_log(f"⏳ {count}개 작업 삭제 중...")
+            import concurrent.futures
+            def do_delete():
+                for job_id in job_ids:
+                    self.farm_manager.delete_job(job_id)
+                return count
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(do_delete)
+            future.add_done_callback(
+                lambda f: self.log_signal.emit(f"🗑️ {f.result()}개 작업 삭제됨") if f.result() else None
+            )
+            executor.shutdown(wait=False)
 
     def open_output_folder(self, job_id: str):
         """작업의 출력 폴더 열기"""

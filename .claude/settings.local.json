@@ -87,7 +87,16 @@
       "Bash(python -m py_compile:*)",
       "Bash(python patch_farm_ui.py:*)",
       "Bash(python apply_patches.py:*)",
-      "Bash(python patch_split_job.py:*)"
+      "Bash(python patch_split_job.py:*)",
+      "Bash(python patch_mark_job.py:*)",
+      "Bash(python patch_async_mark.py:*)",
+      "Bash(python patch_async_mark2.py:*)",
+      "Bash(python patch_path_syntax.py:*)",
+      "Bash(python patch_async_reset.py:*)",
+      "Bash(python patch_job_status.py:*)",
+      "Bash(python patch_filter_excluded.py:*)",
+      "Bash(python patch_ui_exclude.py:*)",
+      "Bash(python patch_delete_batch.py:*)"
     ],
     "deny": [],
     "ask": []
