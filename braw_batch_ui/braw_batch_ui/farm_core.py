@@ -440,6 +440,11 @@ class FarmManager:
 
     def submit_job(self, job: RenderJob):
         """작업 제출 (15대 동시 운영 최적화)"""
+        # 필요한 디렉토리 생성 (없으면)
+        for d in [self.config.jobs_dir, self.config.claims_dir,
+                  self.config.workers_dir, self.config.completed_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+
         job_file = self.config.jobs_dir / f"{job.job_id}.json"
         safe_json_write(job_file, job.to_dict(), use_temp=True)
 
